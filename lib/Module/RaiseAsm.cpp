@@ -81,17 +81,28 @@ bool RaiseAsmPass::runOnModule(Module &M) {
   std::string Err;
 
   // Use target triple from the module if possible.
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+  // Module::getTargetTriple() returns a llvm::Triple as of LLVM 21.
+  llvm::Triple TargetTriple = M.getTargetTriple();
+  if (TargetTriple.str().empty())
+    TargetTriple = llvm::Triple(llvm::sys::getDefaultTargetTriple());
+  const Target *Target = TargetRegistry::lookupTarget(TargetTriple.str(), Err);
+#else
   std::string TargetTriple = M.getTargetTriple();
   if (TargetTriple.empty())
     TargetTriple = llvm::sys::getDefaultTargetTriple();
   const Target *Target = TargetRegistry::lookupTarget(TargetTriple, Err);
+#endif
 
   TargetMachine * TM = 0;
   if (Target == 0) {
     klee_warning("Warning: unable to select target: %s", Err.c_str());
     TLI = 0;
   } else {
-#if LLVM_VERSION_CODE >= LLVM_VERSION(16, 0)
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+    TM = Target->createTargetMachine(TargetTriple.str(), "", "",
+                                     TargetOptions(), std::nullopt);
+#elif LLVM_VERSION_CODE >= LLVM_VERSION(16, 0)
     TM = Target->createTargetMachine(TargetTriple, "", "", TargetOptions(),
                                      std::nullopt);
 #else
@@ -101,7 +112,11 @@ bool RaiseAsmPass::runOnModule(Module &M) {
 
     TLI = TM->getSubtargetImpl(*(M.begin()))->getTargetLowering();
 
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+    triple = TargetTriple;
+#else
     triple = llvm::Triple(TargetTriple);
+#endif
   }
 
   for (Module::iterator fi = M.begin(), fe = M.end(); fi != fe; ++fi) {
