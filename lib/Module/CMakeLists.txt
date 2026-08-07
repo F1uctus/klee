@@ -53,6 +53,11 @@ llvm_config(kleeModule "${USE_LLVM_SHARED}"
   object
   mc
   binaryformat
+  # RaiseAsmPass looks up the target named by the module being analysed, which
+  # need not be the host: firmware bitcode generally is not.
+  AllTargetsInfos
+  AllTargetsDescs
+  AllTargetsCodeGens
   )
 
 target_link_libraries(kleeModule PRIVATE

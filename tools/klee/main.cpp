@@ -1247,6 +1247,13 @@ int main(int argc, char **argv, char **envp) {
       &MemoryCat,      &MergeCat,    &MiscCat,     &ModuleCat,   &ReplayCat,
       &SearchCat,      &SeedingCat,  &SolvingCat,  &StartCat,    &StatsCat,
       &TerminationCat, &TestCaseCat, &TestGenCat,  &ExecTreeCat, &ExecTreeCat});
+  // Register every target LLVM was built with, not just the host one. The
+  // module under analysis may well be for another architecture -- firmware
+  // bitcode usually is -- and RaiseAsmPass silently gives up when it cannot
+  // look up the module's target.
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
   llvm::InitializeNativeTarget();
 
   parseArguments(argc, argv);
@@ -1365,6 +1372,13 @@ int main(int argc, char **argv, char **envp) {
       module_triple.find("i486") != std::string::npos ||
       module_triple.find("i386") != std::string::npos)
     opt_suffix = "32";
+  else if (module_triple.rfind("thumb", 0) == 0 ||
+           module_triple.rfind("armv", 0) == 0 ||
+           module_triple.rfind("arm-", 0) == 0)
+    // 32bit ARM, including every Cortex-M profile. These all share a single
+    // data layout, so one runtime build serves them all. Matching on a prefix
+    // keeps aarch64 out, which is a 64bit target and wants the "64" runtime.
+    opt_suffix = "arm32";
 
   // Add additional user-selected suffix
   opt_suffix += "_" + RuntimeBuild.getValue();
