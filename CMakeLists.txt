@@ -268,7 +268,14 @@ endif()
 ################################################################################
 # TCMalloc support
 ################################################################################
-OPTION(ENABLE_TCMALLOC "Enable TCMalloc support" ON)
+if (WIN32)
+  # gperftools does not ship a supported MSVC build, so default TCMalloc off
+  # rather than failing configuration on a platform where it cannot be found.
+  set(ENABLE_TCMALLOC_DEFAULT OFF)
+else()
+  set(ENABLE_TCMALLOC_DEFAULT ON)
+endif()
+OPTION(ENABLE_TCMALLOC "Enable TCMalloc support" ${ENABLE_TCMALLOC_DEFAULT})
 if (ENABLE_TCMALLOC)
   message(STATUS "TCMalloc support enabled")
   set(TCMALLOC_HEADER "gperftools/malloc_extension.h")
