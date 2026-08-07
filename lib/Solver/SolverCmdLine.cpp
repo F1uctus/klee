@@ -114,22 +114,27 @@ cl::opt<bool> UseAssignmentValidatingSolver(
 
 void KCommandLine::KeepOnlyCategories(
     std::set<llvm::cl::OptionCategory *> const &categories) {
-  StringMap<cl::Option *> &map = cl::getRegisteredOptions();
+  // getRegisteredOptions() returns a StringMap up to LLVM 20 and a DenseMap
+  // from LLVM 21 on, and the two spell their key differently. The key is just
+  // the option's own argument string, so read it from the option and stay
+  // independent of the container type.
+  auto &map = cl::getRegisteredOptions();
 
   for (auto &elem : map) {
-    if (elem.first() == "version" || elem.first() == "color" ||
-        elem.first() == "help"    || elem.first() == "help-list")
+    cl::Option *option = elem.second;
+    if (option->ArgStr == "version" || option->ArgStr == "color" ||
+        option->ArgStr == "help"    || option->ArgStr == "help-list")
       continue;
 
     bool keep = false;
-    for (auto &cat : elem.second->Categories) {
+    for (auto &cat : option->Categories) {
       if (categories.find(cat) != categories.end()) {
         keep = true;
         break;
       }
     }
     if (!keep)
-      elem.second->setHiddenFlag(cl::Hidden);
+      option->setHiddenFlag(cl::Hidden);
   }
 }
 
