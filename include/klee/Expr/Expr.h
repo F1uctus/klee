@@ -12,6 +12,7 @@
 
 #include "klee/ADT/Bits.h"
 #include "klee/ADT/Ref.h"
+#include "klee/Config/Version.h"
 
 #include "klee/Support/CompilerWarning.h"
 DISABLE_WARNING_PUSH
@@ -1079,7 +1080,14 @@ public:
   }
 
   static ref<ConstantExpr> alloc(uint64_t v, Width w) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+    // As of LLVM 21 APInt asserts that the value fits into the requested bit
+    // width. KLEE relies on the implicit truncation, e.g. to construct -1 at a
+    // width narrower than 64 bits, so ask for it explicitly.
+    return alloc(llvm::APInt(w, v, /*isSigned=*/false, /*implicitTrunc=*/true));
+#else
     return alloc(llvm::APInt(w, v));
+#endif
   }
 
   static ref<ConstantExpr> create(uint64_t v, Width w) {
