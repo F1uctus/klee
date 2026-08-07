@@ -26,6 +26,7 @@
 
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -89,6 +90,21 @@ llvm::cl::opt<bool> ClearArrayAfterQuery(
 
 static std::string getQueryLogPath(const char filename[])
 {
+#if defined(_WIN32)
+	// Windows has no uid/gid ownership bits to inspect, so ask the filesystem
+	// whether the directory is writable rather than deriving it from st_mode.
+	if (!llvm::sys::fs::is_directory(DirectoryToWriteQueryLogs))
+	{
+          llvm::errs() << "Directory to log queries \""
+                       << DirectoryToWriteQueryLogs << "\" does not exist!"
+                       << "\n";
+          exit(1);
+        }
+
+	if (llvm::sys::fs::access(DirectoryToWriteQueryLogs,
+	                          llvm::sys::fs::AccessMode::Write))
+	{
+#else
 	//check directoryToWriteLogs exists
 	struct stat s;
 	if( !(stat(DirectoryToWriteQueryLogs.c_str(),&s) == 0 && S_ISDIR(s.st_mode)) )
@@ -105,6 +121,7 @@ static std::string getQueryLogPath(const char filename[])
 	    !( s.st_mode & S_IWOTH)
 	)
 	{
+#endif
           llvm::errs() << "Directory to log queries \""
                        << DirectoryToWriteQueryLogs << "\" is not writable!"
                        << "\n";

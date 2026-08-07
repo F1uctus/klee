@@ -18,7 +18,10 @@
 Tree::Tree(const std::filesystem::path &path) {
   // open db
   ::sqlite3 *db;
-  if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
+  // path::c_str() yields wchar_t* on Windows, so go through string() to get the
+  // narrow encoding sqlite3 expects.
+  const std::string pathStr = path.string();
+  if (sqlite3_open_v2(pathStr.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) !=
       SQLITE_OK) {
     std::cerr << "Cannot open execution tree database: " << sqlite3_errmsg(db)
               << std::endl;

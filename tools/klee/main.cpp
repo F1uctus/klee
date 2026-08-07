@@ -449,7 +449,7 @@ KleeHandler::KleeHandler(int argc, char **argv)
 
   if (dir_given) {
     // OutputDir
-    if (mkdir(directory.c_str(), 0775) < 0)
+    if (klee::makeDirectory(directory.c_str(), 0775) < 0)
       klee_error("cannot create \"%s\": %s", directory.c_str(), strerror(errno));
 
     m_outputDirectory = directory;
@@ -464,7 +464,7 @@ KleeHandler::KleeHandler(int argc, char **argv)
       // SmallString is always up-to-date, no need to flush. See Support/raw_ostream.h
 
       // create directory and try to link klee-last
-      if (mkdir(d.c_str(), 0775) == 0) {
+      if (klee::makeDirectory(d.c_str(), 0775) == 0) {
         m_outputDirectory = d;
 
         SmallString<128> klee_last(directory);
@@ -477,8 +477,8 @@ KleeHandler::KleeHandler(int argc, char **argv)
 
         size_t offset = m_outputDirectory.size() -
                         llvm::sys::path::filename(m_outputDirectory).size();
-        if (symlink(m_outputDirectory.c_str() + offset, klee_last.c_str()) <
-            0) {
+        if (klee::createDirectorySymlink(m_outputDirectory.c_str() + offset,
+                                         klee_last.c_str()) < 0) {
           klee_warning("cannot create klee-last symlink: %s", strerror(errno));
         }
 
