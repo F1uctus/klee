@@ -91,8 +91,10 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#ifndef _WIN32
 #include <sys/mman.h>
 #include <sys/resource.h>
+#endif
 #include <vector>
 
 using namespace llvm;
@@ -4306,17 +4308,15 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   double avgNeededPages = 0;
   if (MemoryManager::isDeterministic) {
     auto const minflt = [] {
-      struct rusage ru = {};
-      [[maybe_unused]] int ret = getrusage(RUSAGE_SELF, &ru);
-      assert(!ret && "getrusage failed");
-      assert(ru.ru_minflt >= 0);
-      return ru.ru_minflt;
+      std::uint64_t faults = 0;
+      [[maybe_unused]] bool ok = klee::getMinorPageFaultCount(faults);
+      assert(ok && "could not query the minor page fault count");
+      return faults;
     };
 
     auto tmp = minflt();
     std::size_t neededPages = state.addressSpace.copyOutConcretes();
     auto newPages = minflt() - tmp;
-    assert(newPages >= 0);
     residentPages += newPages;
     assert(residentPages >= neededPages &&
            "allocator too full, assumption that each object occupies its own "
