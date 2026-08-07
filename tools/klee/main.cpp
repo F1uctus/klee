@@ -53,11 +53,13 @@ DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Support/TargetSelect.h"
 DISABLE_WARNING_POP
 
-#include <dirent.h>
 #include <signal.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/wait.h>
-#include <unistd.h>
+#endif
+
+#include "klee/Support/PlatformCompat.h"
 
 #include <cerrno>
 #include <ctime>
@@ -468,7 +470,7 @@ KleeHandler::KleeHandler(int argc, char **argv)
         SmallString<128> klee_last(directory);
         llvm::sys::path::append(klee_last, "klee-last");
 
-        if ((unlink(klee_last.c_str()) < 0) && (errno != ENOENT)) {
+        if ((klee::removeFile(klee_last.c_str()) < 0) && (errno != ENOENT)) {
           klee_warning("cannot remove existing klee-last symlink: %s",
                        strerror(errno));
         }
@@ -1173,6 +1175,7 @@ static void interrupt_handle() {
   interrupted = true;
 }
 
+#ifndef _WIN32
 static void interrupt_handle_watchdog() {
   // just wait for the child to finish
 }
@@ -1192,6 +1195,7 @@ static void halt_via_gdb(int pid) {
   if (system(buffer)==-1)
     perror("system");
 }
+#endif
 
 static void replaceOrRenameFunction(llvm::Module *module,
 		const char *old_name, const char *new_name)
@@ -1325,6 +1329,12 @@ int main(int argc, char **argv, char **envp) {
   sys::PrintStackTraceOnErrorSignal(argv[0]);
 
   if (Watchdog) {
+#ifdef _WIN32
+    // The watchdog forks and signals its child; there is no faithful Windows
+    // equivalent short of a job object, so refuse rather than silently ignoring
+    // the flag. --max-time is still enforced in-process.
+    klee_error("--watchdog is not supported on Windows");
+#else
     if (MaxTime.empty()) {
       klee_error("--watchdog used without --max-time");
     }
@@ -1389,6 +1399,7 @@ int main(int argc, char **argv, char **envp) {
 
       return 0;
     }
+#endif
   }
 
   sys::SetInterruptFunction(interrupt_handle);
@@ -1635,7 +1646,7 @@ int main(int argc, char **argv, char **envp) {
 
   for (int i = 0; i < argc; i++)
     handler->getInfoStream() << argv[i] << (i + 1 < argc ? " " : "\n");
-  handler->getInfoStream() << "PID: " << getpid() << "\n";
+  handler->getInfoStream() << "PID: " << klee::getProcessID() << "\n";
 
   // Get the desired main function.  klee_main initializes uClibc
   // locale and other data and then calls main.
@@ -1727,7 +1738,7 @@ int main(int argc, char **argv, char **envp) {
     }
 
     if (RunInDir != "") {
-      int res = chdir(RunInDir.c_str());
+      int res = klee::changeDirectory(RunInDir.c_str());
       if (res < 0) {
         klee_error("Unable to change directory to: %s - %s", RunInDir.c_str(),
                    sys::StrError(errno).c_str());
@@ -1787,7 +1798,7 @@ int main(int argc, char **argv, char **envp) {
       interpreter->useSeeds(&seeds);
     }
     if (RunInDir != "") {
-      int res = chdir(RunInDir.c_str());
+      int res = klee::changeDirectory(RunInDir.c_str());
       if (res < 0) {
         klee_error("Unable to change directory to: %s - %s", RunInDir.c_str(),
                    sys::StrError(errno).c_str());

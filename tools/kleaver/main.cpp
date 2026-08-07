@@ -32,7 +32,6 @@
 #include "llvm/Support/Signals.h"
 
 #include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 using namespace llvm;
