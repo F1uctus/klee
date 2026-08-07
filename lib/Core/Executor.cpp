@@ -4911,13 +4911,26 @@ size_t Executor::getAllocationAlignment(const llvm::Value *allocSite) const {
   llvm::Type *type = NULL;
   std::string allocationSiteName(allocSite->getName().str());
   if (const GlobalObject *GO = dyn_cast<GlobalObject>(allocSite)) {
+#if LLVM_VERSION_CODE < LLVM_VERSION(21, 0)
     alignment = GO->getAlignment();
+#endif
     if (const GlobalVariable *globalVar = dyn_cast<GlobalVariable>(GO)) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+      // GlobalObject::getAlignment() was removed in LLVM 21 and
+      // GlobalObject::getAlign() is protected, so the alignment has to be read
+      // through the concrete subclass. Keep returning 0 when it is unset, so
+      // that the type-based fallback below still kicks in.
+      alignment = globalVar->getAlign() ? globalVar->getAlign()->value() : 0;
+#endif
       // All GlobalVariables's have pointer type
       assert(globalVar->getType()->isPointerTy() &&
              "globalVar's type is not a pointer");
       type = globalVar->getValueType();
     } else {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
+      if (const Function *fn = dyn_cast<Function>(GO))
+        alignment = fn->getAlign() ? fn->getAlign()->value() : 0;
+#endif
       type = GO->getType();
     }
   } else if (const AllocaInst *AI = dyn_cast<AllocaInst>(allocSite)) {
