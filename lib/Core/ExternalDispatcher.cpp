@@ -34,11 +34,22 @@ DISABLE_WARNING_POP
 #include <csetjmp>
 #include <csignal>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 using namespace llvm;
 using namespace klee;
 
 /***/
 
+#ifndef _WIN32
 static sigjmp_buf escapeCallJmpBuf;
 
 extern "C" {
@@ -47,6 +58,28 @@ static void sigsegv_handler(int signal, siginfo_t *info, void *context) {
   siglongjmp(escapeCallJmpBuf, 1);
 }
 }
+#else
+// Windows raises a structured exception rather than delivering a signal when an
+// external call touches unmapped memory, so structured exception handling takes
+// the place of the SIGSEGV handler above.
+//
+// The __try block has to live in its own function: MSVC rejects __try in a frame
+// that also needs object unwinding, and runProtectedCall holds a std::vector.
+static int accessViolationFilter(unsigned long code) {
+  return code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER
+                                            : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static bool runFunctionGuarded(llvm::ExecutionEngine *engine, llvm::Function *f,
+                               llvm::ArrayRef<llvm::GenericValue> gvArgs) {
+  __try {
+    engine->runFunction(f, gvArgs);
+    return true;
+  } __except (accessViolationFilter(GetExceptionCode())) {
+    return false;
+  }
+}
+#endif
 
 namespace klee {
 
@@ -219,7 +252,9 @@ bool ExternalDispatcherImpl::executeCall(KCallable *callable, Instruction *i,
 // FIXME: This is not reentrant.
 static uint64_t *gTheArgsP;
 bool ExternalDispatcherImpl::runProtectedCall(Function *f, uint64_t *args) {
+#ifndef _WIN32
   struct sigaction segvAction, segvActionOld;
+#endif
   bool res;
 
   if (!f)
@@ -228,6 +263,14 @@ bool ExternalDispatcherImpl::runProtectedCall(Function *f, uint64_t *args) {
   std::vector<GenericValue> gvArgs;
   gTheArgsP = args;
 
+#if defined(_WIN32)
+  errno = lastErrno;
+  res = runFunctionGuarded(executionEngine, f, gvArgs);
+  if (res) {
+    // Explicitly acquire errno information
+    lastErrno = errno;
+  }
+#else
   segvAction.sa_handler = nullptr;
   sigemptyset(&(segvAction.sa_mask));
   sigaddset(&(segvAction.sa_mask), SIGSEGV);
@@ -246,6 +289,7 @@ bool ExternalDispatcherImpl::runProtectedCall(Function *f, uint64_t *args) {
   }
 
   sigaction(SIGSEGV, &segvActionOld, nullptr);
+#endif
   return res;
 }
 
