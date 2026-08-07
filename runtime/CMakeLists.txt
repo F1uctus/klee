@@ -7,7 +7,12 @@
 #
 #===------------------------------------------------------------------------===#
 # Handle binaries
-add_subdirectory(Runtest)
+if (NOT WIN32)
+    # libkleeRuntest replays a test case against a natively built program; it
+    # maps the .ktest data with mmap and is only useful alongside klee-replay,
+    # which is POSIX-only.
+    add_subdirectory(Runtest)
+endif ()
 
 # Handle bitcode libraries
 # Define the different configurations to be compiled and made available using a specific suffix

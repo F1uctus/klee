@@ -116,12 +116,13 @@ message(STATUS "LLVM directory ${LLVM_DIR}")
 if (LLVM_VERSION_MAJOR LESS 15)
   message(FATAL_ERROR "KLEE requires LLVM 15 or newer")
 endif()
-set(LLVMCC "${LLVM_TOOLS_BINARY_DIR}/clang"
+# CMAKE_EXECUTABLE_SUFFIX is empty on Unix and ".exe" on Windows.
+set(LLVMCC "${LLVM_TOOLS_BINARY_DIR}/clang${CMAKE_EXECUTABLE_SUFFIX}"
   CACHE
   PATH
   "Path to C bitcode compiler"
   )
-set(LLVMCXX "${LLVM_TOOLS_BINARY_DIR}/clang++"
+set(LLVMCXX "${LLVM_TOOLS_BINARY_DIR}/clang++${CMAKE_EXECUTABLE_SUFFIX}"
   CACHE
   PATH
   "Path to C++ bitcode compiler"
@@ -149,11 +150,44 @@ elseif ((NOT LLVM_ENABLE_ASSERTIONS) AND ENABLE_KLEE_ASSERTS)
   )
 endif()
 
+# Prebuilt LLVM releases for Windows record an absolute path to diaguids.lib
+# from the DIA SDK of whichever Visual Studio edition produced the release. That
+# path rarely exists on the machine consuming it, so point the imported target
+# at the local DIA SDK instead. VSINSTALLDIR is exported by vcvarsall.
+if (WIN32 AND TARGET LLVMDebugInfoPDB)
+  get_target_property(_llvm_pdb_libs LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+  if (_llvm_pdb_libs)
+    set(_llvm_pdb_libs_fixed "")
+    foreach (_lib IN LISTS _llvm_pdb_libs)
+      if (_lib MATCHES "diaguids\\.lib$" AND NOT EXISTS "${_lib}")
+        find_library(DIAGUIDS_LIBRARY
+          NAMES diaguids
+          HINTS "$ENV{VSINSTALLDIR}/DIA SDK/lib/amd64"
+          DOC "Path to the DIA SDK diaguids library"
+        )
+        if (DIAGUIDS_LIBRARY)
+          message(STATUS "Remapped missing diaguids.lib to ${DIAGUIDS_LIBRARY}")
+          list(APPEND _llvm_pdb_libs_fixed "${DIAGUIDS_LIBRARY}")
+        else()
+          message(FATAL_ERROR
+            "LLVM references \"${_lib}\", which does not exist, and no local "
+            "diaguids.lib could be found. Run this build from a Visual Studio "
+            "developer prompt so that VSINSTALLDIR is set.")
+        endif()
+      else()
+        list(APPEND _llvm_pdb_libs_fixed "${_lib}")
+      endif()
+    endforeach()
+    set_target_properties(LLVMDebugInfoPDB PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_llvm_pdb_libs_fixed}")
+  endif()
+endif()
+
 list(APPEND KLEE_COMPONENT_CXX_DEFINES ${LLVM_DEFINITIONS})
 list(APPEND KLEE_COMPONENT_EXTRA_INCLUDE_DIRS ${LLVM_INCLUDE_DIRS})
 
 # Find llvm-link
-set(LLVM_LINK "${LLVM_TOOLS_BINARY_DIR}/llvm-link"
+set(LLVM_LINK "${LLVM_TOOLS_BINARY_DIR}/llvm-link${CMAKE_EXECUTABLE_SUFFIX}"
   CACHE
   PATH
   "Path to bitcode linker"
@@ -163,7 +197,7 @@ if (NOT EXISTS "${LLVM_LINK}")
 endif()
 
 # Find llvm-ar
-set(LLVM_AR "${LLVM_TOOLS_BINARY_DIR}/llvm-ar"
+set(LLVM_AR "${LLVM_TOOLS_BINARY_DIR}/llvm-ar${CMAKE_EXECUTABLE_SUFFIX}"
   CACHE
   PATH
   "Path to bitcode archive tool"
@@ -173,7 +207,7 @@ if (NOT EXISTS "${LLVM_AR}")
 endif()
 
 # Find llvm-as
-set(LLVM_AS "${LLVM_TOOLS_BINARY_DIR}/llvm-as"
+set(LLVM_AS "${LLVM_TOOLS_BINARY_DIR}/llvm-as${CMAKE_EXECUTABLE_SUFFIX}"
   CACHE
   PATH
   "Path to bitcode assembly tool"
@@ -263,6 +297,10 @@ if (ENABLE_ZLIB)
 else()
   message(STATUS "Zlib support disabled")
   unset(HAVE_ZLIB_H) # For config.h
+  # FindZLIB leaves ZLIB_LIBRARIES holding ZLIB_LIBRARY-NOTFOUND when zlib is
+  # absent, and kleeSupport links it unconditionally. Clear it so a build
+  # without zlib does not try to link a library called "NOTFOUND".
+  set(ZLIB_LIBRARIES "")
 endif()
 
 ################################################################################
@@ -350,20 +388,24 @@ endif()
 ################################################################################
 # Detect libutil
 ################################################################################
-find_library(UTIL_LIBRARY NAMES util)
-message(STATUS "Found libutil ${UTIL_LIBRARY}")
+# libutil supplies openpty()/forkpty(), which only klee-replay uses. That tool
+# is POSIX-only and is not part of the Windows build, so do not require it here.
+if (NOT WIN32)
+  find_library(UTIL_LIBRARY NAMES util)
+  message(STATUS "Found libutil ${UTIL_LIBRARY}")
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-  find_path(UTIL_INCLUDE_DIR NAMES util.h libutil.h)
-  message(STATUS "Found libutil include dir ${UTIL_INCLUDE_DIR}")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    find_path(UTIL_INCLUDE_DIR NAMES util.h libutil.h)
+    message(STATUS "Found libutil include dir ${UTIL_INCLUDE_DIR}")
 
-elseif(UNIX)
-  find_path(UTIL_INCLUDE_DIR NAMES pty.h)
-  message(STATUS "Found libutil include dir ${UTIL_INCLUDE_DIR}")
-endif()
+  elseif(UNIX)
+    find_path(UTIL_INCLUDE_DIR NAMES pty.h)
+    message(STATUS "Found libutil include dir ${UTIL_INCLUDE_DIR}")
+  endif()
 
-if (NOT UTIL_INCLUDE_DIR)
-  message(FATAL_ERROR "Could not find libutil")
+  if (NOT UTIL_INCLUDE_DIR)
+    message(FATAL_ERROR "Could not find libutil")
+  endif()
 endif()
 
 ################################################################################
