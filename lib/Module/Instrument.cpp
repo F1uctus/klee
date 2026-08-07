@@ -82,6 +82,8 @@ void klee::instrument(bool CheckDivZero, bool CheckOvershift,
   if (CheckOvershift)
     OvershiftCheckPass().runOnModule(*module);
 
-  llvm::DataLayout targetData(module);
+  // The DataLayout(const Module *) constructor was removed in LLVM 21; the
+  // module already owns the layout, so just copy it.
+  llvm::DataLayout targetData(module->getDataLayout());
   IntrinsicCleanerPass(targetData).runOnModule(*module);
 }

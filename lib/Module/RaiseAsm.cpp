@@ -37,8 +37,15 @@ char RaiseAsmPass::ID = 0;
 
 Function *RaiseAsmPass::getIntrinsic(llvm::Module &M, unsigned IID, Type **Tys,
                                      unsigned NumTys) {
+#if LLVM_VERSION_CODE >= LLVM_VERSION(22, 0)
+  // Intrinsic::getDeclaration was renamed to getOrInsertDeclaration in LLVM 20
+  // and the old spelling was dropped in LLVM 22.
+  return Intrinsic::getOrInsertDeclaration(
+      &M, (llvm::Intrinsic::ID)IID, llvm::ArrayRef<llvm::Type *>(Tys, NumTys));
+#else
   return Intrinsic::getDeclaration(&M, (llvm::Intrinsic::ID) IID,
                                    llvm::ArrayRef<llvm::Type*>(Tys, NumTys));
+#endif
 }
 
 // FIXME: This should just be implemented as a patch to
@@ -57,8 +64,14 @@ bool RaiseAsmPass::runOnInstruction(Module &M, Instruction *I) {
   if (!TLI)
     return false;
 
+#if LLVM_VERSION_CODE < LLVM_VERSION(22, 0)
+  // TargetLowering::ExpandInlineAsm was an X86-only hook that turned a few
+  // known asm strings into IR; LLVM 22 removed it. Without it we simply fall
+  // through to the cases handled below, and anything else is reported as
+  // unsupported inline assembly rather than being silently mistranslated.
   if (TLI->ExpandInlineAsm(ci))
     return true;
+#endif
 
   if ((triple.getArch() == llvm::Triple::x86 ||
        triple.getArch() == llvm::Triple::x86_64) &&
@@ -100,8 +113,9 @@ bool RaiseAsmPass::runOnModule(Module &M) {
     TLI = 0;
   } else {
 #if LLVM_VERSION_CODE >= LLVM_VERSION(21, 0)
-    TM = Target->createTargetMachine(TargetTriple.str(), "", "",
-                                     TargetOptions(), std::nullopt);
+    // createTargetMachine takes the triple as a llvm::Triple as of LLVM 21.
+    TM = Target->createTargetMachine(TargetTriple, "", "", TargetOptions(),
+                                     std::nullopt);
 #elif LLVM_VERSION_CODE >= LLVM_VERSION(16, 0)
     TM = Target->createTargetMachine(TargetTriple, "", "", TargetOptions(),
                                      std::nullopt);

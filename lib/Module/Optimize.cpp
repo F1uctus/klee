@@ -119,7 +119,9 @@ void runFinalKleeCleanup(Module &M, SwitchImplType SwitchType) {
     }
   }
 
-  DataLayout targetData(&M);
+  // The DataLayout(const Module *) constructor was removed in LLVM 21; the
+  // module already owns the layout, so just copy it.
+  DataLayout targetData(M.getDataLayout());
   IntrinsicCleanerPass(targetData).runOnModule(M);
 
   FunctionPassManager ScalarizerFPM;
@@ -167,8 +169,9 @@ void klee::optimizeModule(llvm::Module *M,
     auto PreserveFunctions = [=](const GlobalValue &GV) {
       StringRef GVName = GV.getName();
 
+      // StringRef::equals was dropped in favour of operator==.
       for (const char *fun : preservedFunctions)
-        if (GVName.equals(fun))
+        if (GVName == fun)
           return true;
 
       return false;
