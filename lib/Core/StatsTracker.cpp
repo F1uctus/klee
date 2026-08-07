@@ -20,6 +20,7 @@
 #include "klee/Statistics/Statistics.h"
 #include "klee/Support/ErrorHandling.h"
 #include "klee/Support/ModuleUtil.h"
+#include "klee/Support/PlatformCompat.h"
 #include "klee/System/MemoryUsage.h"
 
 #include "CallPathManager.h"
@@ -47,7 +48,6 @@ DISABLE_WARNING_DEPRECATED_DECLARATIONS
 DISABLE_WARNING_POP
 
 #include <fstream>
-#include <unistd.h>
 
 using namespace klee;
 using namespace llvm;
@@ -640,7 +640,7 @@ void StatsTracker::writeIStats() {
 
   of << "version: 1\n";
   of << "creator: klee\n";
-  of << "pid: " << getpid() << "\n";
+  of << "pid: " << klee::getProcessID() << "\n";
   of << "cmd: " << m->getModuleIdentifier() << "\n\n";
   of << "\n";
 
