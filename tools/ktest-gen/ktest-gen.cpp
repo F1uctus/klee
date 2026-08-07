@@ -14,13 +14,19 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef _WIN32
+// MSVC spells the POSIX name with a leading underscore.
+#define strdup _strdup
+#else
 #include <unistd.h>
+#endif
 
 #include <vector>
 
 #include "klee/ADT/KTest.h"
 
-#if defined(__FreeBSD__) || defined(__minix) || defined(__APPLE__)
+#if defined(__FreeBSD__) || defined(__minix) || defined(__APPLE__) ||          \
+    defined(_WIN32)
 #define stat64 stat
 #endif
 
