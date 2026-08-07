@@ -16,6 +16,7 @@
 
 #include "klee/Expr/Expr.h"
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Support/PlatformCompat.h"
 
 #include "klee/Support/CompilerWarning.h"
 DISABLE_WARNING_PUSH
@@ -28,7 +29,9 @@ DISABLE_WARNING_POP
 
 #include <cinttypes>
 #include <algorithm>
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 #include <tuple>
 #include <string>
 
@@ -37,7 +40,7 @@ using namespace klee;
 namespace klee {
 std::uint32_t MemoryManager::quarantine;
 
-std::size_t MemoryManager::pageSize = sysconf(_SC_PAGE_SIZE);
+std::size_t MemoryManager::pageSize = klee::getPageSize();
 
 bool MemoryManager::isDeterministic;
 
