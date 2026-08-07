@@ -23,6 +23,18 @@
 #include <malloc/malloc.h>
 #endif
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <psapi.h>
+#endif
+
 // ASan Support
 //
 // When building with ASan the `mallinfo()` function is intercepted and always
@@ -101,6 +113,23 @@ size_t util::GetTotalMallocUsage() {
     total += stats.size_in_use;
   }
   return total;
+
+#elif defined(_WIN32)
+
+  // Memory usage on Windows. There is no per-heap "bytes currently handed out
+  // by malloc" counter, so report the private working set instead. That counts
+  // committed pages rather than allocated bytes, making it a slight
+  // over-estimate, but it tracks KLEE's growth closely enough for --max-memory.
+
+  PROCESS_MEMORY_COUNTERS_EX counters;
+  counters.cb = sizeof(counters);
+  if (!::GetProcessMemoryInfo(::GetCurrentProcess(),
+                              reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(
+                                  &counters),
+                              sizeof(counters)))
+    return 0;
+
+  return static_cast<size_t>(counters.PrivateUsage);
 
 #else // HAVE_MALLINFO
 
