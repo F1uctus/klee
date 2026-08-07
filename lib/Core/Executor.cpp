@@ -47,6 +47,7 @@
 #include "klee/Statistics/TimerStatIncrementer.h"
 #include "klee/Support/Casting.h"
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Support/PlatformCompat.h"
 #include "klee/Support/FileHandling.h"
 #include "klee/Support/ModuleUtil.h"
 #include "klee/Support/OptionCategories.h"
@@ -84,7 +85,11 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
+#ifndef _WIN32
+// Nothing here uses the Itanium ABI helpers, but the include has been part of
+// this file for a long time and MSVC has no equivalent header.
 #include <cxxabi.h>
+#endif
 #include <fstream>
 #include <iomanip>
 #include <iosfwd>
@@ -3723,8 +3728,13 @@ bool Executor::checkMemoryUsage() {
 
   // just guess at how many to kill
   const auto numStates = states.size();
-  auto toKill = std::max(1UL, numStates - numStates * MaxMemory / totalUsage);
-  klee_warning("killing %lu states (over memory cap: %luMB)", toKill, totalUsage);
+  // states.size() is a size_t, which is wider than unsigned long on LLP64
+  // targets, so spell the lower bound with the same type rather than relying on
+  // 1UL having the right width.
+  auto toKill = std::max<std::size_t>(
+      1, numStates - numStates * MaxMemory / totalUsage);
+  klee_warning("killing %zu states (over memory cap: %" PRIu64 "MB)", toKill,
+               static_cast<std::uint64_t>(totalUsage));
 
   // randomly select states for early termination
   std::vector<ExecutionState *> arr(states.begin(), states.end()); // FIXME: expensive
@@ -4432,7 +4442,7 @@ ref<Expr> Executor::replaceReadWithSymbolic(ExecutionState &state,
   if (!isa<ConstantExpr>(e))
     return e;
 
-  if (n != 1 && random() % n)
+  if (n != 1 && klee::randomNumber() % n)
     return e;
 
   // create a new fresh location, assert it is equal to concrete value in e
@@ -5342,7 +5352,7 @@ ref<Expr> Executor::makeSymbolicArgument(ExecutionState &state, Function *f,
 void Executor::runFunctionSymbolically(Function *f) {
   // force deterministic initialization of memory objects
   srand(1);
-  srandom(1);
+  klee::seedRandom(1);
 
   KFunction *kf = kmodule->functionMap[f];
   assert(kf);
@@ -5396,7 +5406,7 @@ void Executor::runFunctionAsMain(Function *f,
 
   // force deterministic initialization of memory objects
   srand(1);
-  srandom(1);
+  klee::seedRandom(1);
   
   MemoryObject *argvMO = 0;
 
@@ -5763,12 +5773,9 @@ void Executor::prepareForEarlyExit() {
 
 /// Returns the errno location in memory
 int *Executor::getErrnoLocation(const ExecutionState &state) const {
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
-  /* From /usr/include/errno.h: it [errno] is a per-thread variable. */
-  return __errno_location();
-#else
-  return __error();
-#endif
+  /* errno is a per-thread variable, so its address has to be asked for rather
+     than taken from a global. */
+  return klee::getErrnoLocation();
 }
 
 void Executor::dumpExecutionTree() {

@@ -65,6 +65,26 @@ bool getProcessUserTime(std::uint64_t &microseconds) {
 #endif
 }
 
+int createDirectorySymlink(const char *target, const char *linkPath) {
+#if defined(_WIN32)
+  // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE lets this succeed without
+  // elevation when Developer Mode is on. Older Windows builds reject the flag
+  // outright, so retry without it before giving up.
+  DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY |
+                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+  if (::CreateSymbolicLinkA(linkPath, target, flags))
+    return 0;
+
+  if (::GetLastError() == ERROR_INVALID_PARAMETER &&
+      ::CreateSymbolicLinkA(linkPath, target, SYMBOLIC_LINK_FLAG_DIRECTORY))
+    return 0;
+
+  return -1;
+#else
+  return ::symlink(target, linkPath);
+#endif
+}
+
 bool getMinorPageFaultCount(std::uint64_t &faults) {
 #if defined(_WIN32)
   // Windows does not distinguish minor from major faults in this API; PageFaultCount
