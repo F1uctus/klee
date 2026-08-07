@@ -16,8 +16,18 @@
 #include <cstdlib>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 #if defined(__linux__)
 #include <linux/version.h>
@@ -31,12 +41,54 @@
 #include "klee/Support/ErrorHandling.h"
 
 namespace klee::kdalloc {
+/// Sentinel for "this object does not hold a mapping". On POSIX this is mmap's
+/// own MAP_FAILED so that behaviour is bit-for-bit unchanged; on Windows, where
+/// VirtualAlloc reports failure with NULL, it is nullptr.
+#if defined(_WIN32)
+#define KDALLOC_MAPPING_INVALID (nullptr)
+#else
+#define KDALLOC_MAPPING_INVALID (MAP_FAILED)
+#endif
+
 class Mapping {
-  void *baseAddress = MAP_FAILED;
+  void *baseAddress = KDALLOC_MAPPING_INVALID;
   std::size_t size = 0;
 
+#if defined(_WIN32)
   bool try_map(std::uintptr_t baseAddress) noexcept {
-    assert(this->baseAddress == MAP_FAILED);
+    assert(this->baseAddress == KDALLOC_MAPPING_INVALID);
+
+    // Reserve and commit in one call. Windows commits lazily -- pages are
+    // backed only when first touched -- which is the behaviour MAP_NORESERVE
+    // gives us on Linux, and is what makes the multi-GiB default arena sizes
+    // affordable.
+    //
+    // When a fixed base address is requested, VirtualAlloc fails outright if
+    // the range is already occupied rather than relocating, so there is no need
+    // for the "did we get what we asked for" unmap dance the POSIX path does.
+    // We still check, because a caller passing 0 gets to keep whatever it got.
+    void *mappedAddress =
+        ::VirtualAlloc(reinterpret_cast<LPVOID>(baseAddress), size,
+                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (mappedAddress == nullptr) {
+      this->baseAddress = KDALLOC_MAPPING_INVALID;
+      return false;
+    }
+    if (baseAddress != 0 &&
+        baseAddress != reinterpret_cast<std::uintptr_t>(mappedAddress)) {
+      [[maybe_unused]] BOOL rc =
+          ::VirtualFree(mappedAddress, 0, MEM_RELEASE);
+      assert(rc && "VirtualFree failed");
+      this->baseAddress = KDALLOC_MAPPING_INVALID;
+      return false;
+    }
+    this->baseAddress = mappedAddress;
+
+    return true;
+  }
+#else
+  bool try_map(std::uintptr_t baseAddress) noexcept {
+    assert(this->baseAddress == KDALLOC_MAPPING_INVALID);
 
     int flags = MAP_ANON | MAP_PRIVATE;
 #if defined(__linux__)
@@ -90,6 +142,7 @@ class Mapping {
 
     return true;
   }
+#endif
 
 public:
   Mapping() = default;
@@ -105,7 +158,7 @@ public:
 
   Mapping(Mapping &&other) noexcept
       : baseAddress(other.baseAddress), size(other.size) {
-    other.baseAddress = MAP_FAILED;
+    other.baseAddress = KDALLOC_MAPPING_INVALID;
     other.size = 0;
   }
   Mapping &operator=(Mapping &&other) noexcept {
@@ -127,7 +180,17 @@ public:
   void clear() {
     assert(*this && "Invalid mapping");
 
-#if defined(__linux__)
+#if defined(_WIN32)
+    // Decommitting releases the physical backing while keeping the reservation,
+    // so the arena stays at the address KDAlloc handed out. This is the
+    // equivalent of Linux's MADV_DONTNEED and, like it, avoids the teardown and
+    // re-reserve the generic POSIX path needs.
+    [[maybe_unused]] BOOL rc = ::VirtualFree(baseAddress, size, MEM_DECOMMIT);
+    assert(rc && "VirtualFree(MEM_DECOMMIT) failed");
+    [[maybe_unused]] LPVOID recommitted =
+        ::VirtualAlloc(baseAddress, size, MEM_COMMIT, PAGE_READWRITE);
+    assert(recommitted == baseAddress && "could not recommit the mapping");
+#elif defined(__linux__)
     [[maybe_unused]] int rc = ::madvise(baseAddress, size, MADV_DONTNEED);
     assert(rc == 0 && "madvise failed");
 #else
@@ -140,12 +203,20 @@ public:
 #endif
   }
 
-  explicit operator bool() const noexcept { return baseAddress != MAP_FAILED; }
+  explicit operator bool() const noexcept {
+    return baseAddress != KDALLOC_MAPPING_INVALID;
+  }
 
   ~Mapping() {
     if (*this) {
+#if defined(_WIN32)
+      // MEM_RELEASE frees the whole reservation and requires a size of 0.
+      [[maybe_unused]] BOOL rc = ::VirtualFree(baseAddress, 0, MEM_RELEASE);
+      assert(rc && "VirtualFree(MEM_RELEASE) failed");
+#else
       [[maybe_unused]] int rc = ::munmap(baseAddress, size);
       assert(rc == 0 && "munmap failed");
+#endif
     }
   }
 };
