@@ -18,7 +18,9 @@ DISABLE_WARNING_POP
 
 #include <chrono>
 #include <string>
+#ifndef _WIN32
 #include <sys/time.h>
+#endif
 
 namespace klee {
   namespace time {
@@ -86,7 +88,11 @@ namespace klee {
       // conversions
       explicit operator Duration() const;
       explicit operator bool() const;
+#ifndef _WIN32
+      /// timeval is a POSIX type, and this conversion exists only to feed
+      /// POSIX APIs that take one.
       explicit operator timeval() const;
+#endif
 
       std::uint64_t toMicroseconds() const;
       double toSeconds() const;

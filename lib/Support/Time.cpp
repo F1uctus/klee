@@ -8,6 +8,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Support/PlatformCompat.h"
 #include "klee/System/Time.h"
 
 
@@ -15,7 +16,6 @@
 #include <regex>
 #include <sstream>
 #include <tuple>
-#include <sys/resource.h>
 
 
 using namespace klee;
@@ -147,6 +147,7 @@ time::Span::operator time::Duration() const { return duration; }
 
 time::Span::operator bool() const { return duration.count() != 0; }
 
+#ifndef _WIN32
 time::Span::operator timeval() const {
   timeval tv{};
   const auto secs = std::chrono::duration_cast<std::chrono::seconds>(duration);
@@ -155,6 +156,7 @@ time::Span::operator timeval() const {
   tv.tv_usec = usecs.count();
   return tv;
 }
+#endif
 
 std::uint64_t time::Span::toMicroseconds() const {
   return (std::uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
@@ -189,16 +191,14 @@ std::string time::getClockInfo() {
 
 /// Returns time spent by this process in user mode
 time::Span time::getUserTime() {
-  rusage usage{};
-  auto ret = ::getrusage(RUSAGE_SELF, &usage);
+  std::uint64_t usecs = 0;
 
-  if (ret) {
-    klee_warning("getrusage returned with error, return (0,0)");
+  if (!klee::getProcessUserTime(usecs)) {
+    klee_warning("could not query the process user time, return (0,0)");
     return {};
-  } else {
-    return time::seconds(static_cast<std::uint64_t>(usage.ru_utime.tv_sec)) +
-           time::microseconds(static_cast<std::uint64_t>(usage.ru_utime.tv_usec));
   }
+
+  return time::microseconds(usecs);
 }
 
 
