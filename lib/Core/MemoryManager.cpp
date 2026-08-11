@@ -368,9 +368,12 @@ MemoryObject *MemoryManager::allocate(uint64_t size, bool isLocal,
     void *allocAddress;
 
     if (isGlobal) {
+      // An external object has no allocation site in the module, so both casts
+      // have to tolerate a null one rather than assert on it.
       const llvm::GlobalVariable *gv =
-          dyn_cast<llvm::GlobalVariable>(allocSite);
-      if (isa<llvm::Function>(allocSite) || (gv && gv->isConstant())) {
+          dyn_cast_or_null<llvm::GlobalVariable>(allocSite);
+      if (isa_and_nonnull<llvm::Function>(allocSite) ||
+          (gv && gv->isConstant())) {
         allocAddress = constantsAllocator.allocate(
             std::max(size, static_cast<std::uint64_t>(alignment)));
       } else {

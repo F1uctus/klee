@@ -668,11 +668,35 @@ void Executor::initializeGlobalObject(ExecutionState &state, ObjectState *os,
   }
 }
 
-MemoryObject * Executor::addExternalObject(ExecutionState &state, 
-                                           void *addr, unsigned size, 
+MemoryObject * Executor::addExternalObject(ExecutionState &state,
+                                           void *addr, unsigned size,
                                            bool isReadOnly) {
-  auto mo = memory->allocateFixed(reinterpret_cast<std::uint64_t>(addr),
-                                  size, nullptr);
+  auto hostAddress = reinterpret_cast<std::uint64_t>(addr);
+  const unsigned pointerWidth = Context::get().getPointerWidth();
+
+  MemoryObject *mo;
+  if (hostAddress != bits64::truncateToNBits(hostAddress, pointerWidth)) {
+    // The object is being placed at the address it has in this process, which
+    // only works while the module's pointers are as wide as the host's. For a
+    // 32bit module on a 64bit host they are not, and MemoryObject::getBaseExpr
+    // builds addresses at the module's width, so the object could never be
+    // resolved -- it would assert on the truncated constant instead.
+    //
+    // Sharing the address with the host only matters for handing the object to
+    // a real external call, and that is already impossible for a module of
+    // another architecture, so a copy inside the module's own space is as good
+    // as the original here.
+    mo = memory->allocate(size, /*isLocal=*/false, /*isGlobal=*/true, &state,
+                          /*allocSite=*/nullptr, /*alignment=*/8);
+    if (!mo)
+      klee_error("Could not allocate memory for an external object");
+    klee_warning_once(addr,
+                      "External object at %p does not fit in a %u-bit pointer; "
+                      "placing a copy inside the module's address space",
+                      addr, pointerWidth);
+  } else {
+    mo = memory->allocateFixed(hostAddress, size, nullptr);
+  }
   ObjectState *os = bindObjectInState(state, mo, false);
   for(unsigned i = 0; i < size; i++)
     os->write8(i, ((uint8_t*)addr)[i]);
@@ -4133,8 +4157,16 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   ObjectPair result;
   bool resolved = state.addressSpace.resolveOne(
       ConstantExpr::create((uint64_t)errno_addr, Expr::Int64), result);
-  if (!resolved)
+  if (!resolved) {
+    // The errno object is only at its host address while the module's pointers
+    // are as wide as the host's; otherwise addExternalObject had to relocate
+    // it. Such a module cannot be called into from here anyway, so there is
+    // nothing to synchronise and this is not the fatal condition it would be
+    // for a native module.
+    if (Context::get().getPointerWidth() != 64)
+      return;
     klee_error("Could not resolve memory object for errno");
+  }
   ref<Expr> errValueExpr = result.second->read(0, sizeof(*errno_addr) * 8);
   ConstantExpr *errnoValue = dyn_cast<ConstantExpr>(errValueExpr);
   if (!errnoValue) {
