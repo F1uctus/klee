@@ -323,6 +323,24 @@ jobs:
           cmake --build build --parallel
           if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 
+      - name: Put the Z3 runtime next to the built binaries
+        run: |
+          # klee.exe imports libz3.dll, which lives in the Z3 package rather
+          # than beside the build output, so a build-tree run fails to start
+          # with STATUS_DLL_NOT_FOUND (0xC0000135) and no message of its own.
+          # The packaged distribution ships its own copy; this is what makes
+          # the build tree runnable too, which is what a developer would want
+          # locally as well.
+          $dlls = @('libz3.dll', 'msvcp140.dll', 'msvcp140_1.dll',
+                    'msvcp140_2.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+          foreach ($dll in $dlls) {
+            $source = Join-Path "$env:Z3_ROOT\bin" $dll
+            if (Test-Path -LiteralPath $source) {
+              Copy-Item -LiteralPath $source -Destination 'build\bin' -Force
+            }
+          }
+          Get-ChildItem build\bin\*.dll | ForEach-Object { Write-Host $_.Name }
+
       - name: Check the import surface
         run: |
           # The distribution's whole point is that it depends on nothing outside
