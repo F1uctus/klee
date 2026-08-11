@@ -1,4 +1,4 @@
-; RUN: %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
+; RUN: %python %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
 
 declare void @print_i1(i1)
 

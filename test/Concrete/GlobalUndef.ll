@@ -1,4 +1,4 @@
-; RUN: %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
+; RUN: %python %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
 
 %struct.anon = type { i8, [3 x i8] }
 

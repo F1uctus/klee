@@ -1,4 +1,4 @@
-; RUN: %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
+; RUN: %python %S/ConcreteTest.py --klee='%klee' --lli=%lli %s
 
 %struct.dirent = type { i64, i64, i16, i8 }
 declare void @print_i64(i64)
