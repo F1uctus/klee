@@ -122,8 +122,23 @@ LONG CALLBACK lazyCommitHandler(EXCEPTION_POINTERS *info) {
                        MEM_COMMIT, PAGE_READWRITE))
       return EXCEPTION_CONTINUE_EXECUTION;
 
-    // Out of commit for real: let the normal crash path report it rather than
-    // spinning on the same fault forever.
+    // Genuinely out of commit. Letting the fault propagate would surface as a
+    // bare access violation with no hint of the cause, which is impossible to
+    // diagnose -- and this is a reachable condition, since several KLEE
+    // processes running at once can exhaust the machine's commit limit. Say so
+    // before giving up.
+    //
+    // Only WriteFile is used here: this runs in exception context, so anything
+    // that allocates or takes a lock could deadlock.
+    static const char message[] =
+        "KLEE: ERROR: out of memory: could not commit a page of the "
+        "deterministic allocator arena. The system commit limit (RAM plus "
+        "pagefile) is exhausted; reduce concurrent KLEE processes, lower "
+        "-max-memory, or pass -kdalloc=false.\n";
+    DWORD written = 0;
+    ::WriteFile(::GetStdHandle(STD_ERROR_HANDLE), message,
+                static_cast<DWORD>(sizeof(message) - 1), &written, nullptr);
+
     return EXCEPTION_CONTINUE_SEARCH;
   }
 
