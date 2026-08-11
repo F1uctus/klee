@@ -1453,7 +1453,12 @@ int main(int argc, char **argv, char **envp) {
 #endif
   std::string host_triple = llvm::sys::getDefaultTargetTriple();
 
-  if (module_triple != host_triple)
+  // Compare the triples structurally rather than as strings. Clang records the
+  // toolchain version in the triple it emits ("x86_64-pc-windows-msvc19.33.0")
+  // while getDefaultTargetTriple() has no version, so a string comparison warns
+  // on every single native run on Windows even though the two agree on
+  // everything that matters to execution.
+  if (!llvm::Triple(module_triple).isCompatibleWith(llvm::Triple(host_triple)))
     klee_warning("Module and host target triples do not match: '%s' != '%s'\n"
                  "This may cause unexpected crashes or assertion violations.",
                  module_triple.c_str(), host_triple.c_str());
