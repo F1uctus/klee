@@ -247,6 +247,12 @@ private:
   bool mockExternalCall(ExecutionState &state, KInstruction *target,
                         KCallable *callable, const char *reason);
 
+  /// Builds a symbolic value for one entry point parameter, allocating backing
+  /// storage in \p state. Pointer parameters get an object of the pointee's
+  /// size and the address of that object is returned.
+  ref<Expr> makeSymbolicArgument(ExecutionState &state, llvm::Function *f,
+                                 unsigned index, const llvm::Argument &arg);
+
   ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
                                  bool isLocal, const Array *array = 0);
 
@@ -550,6 +556,8 @@ public:
 
   void runFunctionAsMain(llvm::Function *f, int argc, char **argv,
                          char **envp) override;
+
+  void runFunctionSymbolically(llvm::Function *f) override;
 
   /*** Runtime options ***/
 

@@ -141,6 +141,13 @@ namespace {
              cl::init("main"),
              cl::cat(StartCat));
 
+  cl::opt<bool> SymbolicEntryArgs(
+      "symbolic-entry-args",
+      cl::desc("Start the entry point with every parameter symbolic instead of "
+               "passing argc/argv, so a function can be analysed without a "
+               "hand-written harness (default=false)"),
+      cl::init(false), cl::cat(StartCat));
+
   cl::opt<std::string>
   RunInDir("run-in-dir",
            cl::desc("Change to the given directory before starting execution (default=location of tested file)."),
@@ -1769,7 +1776,10 @@ int main(int argc, char **argv, char **envp) {
       }
     }
 
-    interpreter->runFunctionAsMain(entryFn, pArgc, pArgv, pEnvp);
+    if (SymbolicEntryArgs)
+      interpreter->runFunctionSymbolically(entryFn);
+    else
+      interpreter->runFunctionAsMain(entryFn, pArgc, pArgv, pEnvp);
 
     while (!seeds.empty()) {
       kTest_free(seeds.back());

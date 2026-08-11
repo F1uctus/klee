@@ -59,6 +59,9 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DebugProgramInstruction.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Instructions.h"
@@ -151,6 +154,13 @@ cl::opt<bool> EmitAllErrors(
              "(default=false, i.e. one per (error,instruction) pair)"),
     cl::cat(TestGenCat));
 
+
+cl::opt<std::uint64_t> SymbolicPointeeSize(
+    "symbolic-pointee-size",
+    cl::desc("Bytes to allocate for a symbolic pointer argument whose pointee "
+             "type the debug information does not give a size for "
+             "(default=64)"),
+    cl::init(64), cl::cat(TestGenCat));
 
 /* Constraint solving options */
 
@@ -4717,6 +4727,191 @@ void Executor::executeMakeSymbolic(ExecutionState &state,
 }
 
 /***/
+
+namespace {
+
+/// Strips the wrappers that do not change a type's storage: typedefs, const,
+/// volatile and restrict all appear as DIDerivedType links in the chain.
+const llvm::DIType *stripTypeSugar(const llvm::DIType *ty) {
+  while (const auto *derived = dyn_cast_or_null<llvm::DIDerivedType>(ty)) {
+    switch (derived->getTag()) {
+    case llvm::dwarf::DW_TAG_typedef:
+    case llvm::dwarf::DW_TAG_const_type:
+    case llvm::dwarf::DW_TAG_volatile_type:
+    case llvm::dwarf::DW_TAG_restrict_type:
+    case llvm::dwarf::DW_TAG_atomic_type:
+      ty = derived->getBaseType();
+      continue;
+    default:
+      return derived;
+    }
+  }
+  return ty;
+}
+
+/// The source-level name of parameter \p index of \p f, or "" if the module
+/// carries no debug information saying.
+///
+/// The IR argument's own name is not a substitute: a release build of clang
+/// runs with -discard-value-names, so it is usually absent, and the test case
+/// would then identify its inputs as "arg0", "arg1" rather than by the names
+/// they have in the source.
+std::string parameterNameFromDebugInfo(llvm::Function *f, unsigned index) {
+  if (!f->getSubprogram())
+    return "";
+  // The parameters are DILocalVariables whose getArg() is the 1-based position.
+  // They are reachable from the debug records attached to the instructions that
+  // store each argument to its stack slot; DISubprogram::getRetainedNodes() is
+  // empty for an ordinary -g build, so it cannot be used instead.
+  for (llvm::BasicBlock &bb : *f) {
+    for (llvm::Instruction &inst : bb) {
+      for (llvm::DbgVariableRecord &record :
+           llvm::filterDbgVars(inst.getDbgRecordRange())) {
+        const llvm::DILocalVariable *var = record.getVariable();
+        if (var && var->getArg() == index + 1)
+          return var->getName().str();
+      }
+    }
+  }
+  return "";
+}
+
+/// The size in bytes of what parameter \p index of \p f points at, or 0 if the
+/// module carries no debug information saying.
+///
+/// Opaque pointers mean the IR itself no longer records a pointee type, so for
+/// anything other than a scalar this is the only place the size survives. The
+/// module must have been compiled with -g.
+uint64_t pointeeSizeFromDebugInfo(llvm::Function *f, unsigned index) {
+  llvm::DISubprogram *sp = f->getSubprogram();
+  if (!sp)
+    return 0;
+  llvm::DISubroutineType *fnType = sp->getType();
+  if (!fnType)
+    return 0;
+  llvm::DITypeRefArray types = fnType->getTypeArray();
+  // Element 0 is the return type, so parameter i is at i + 1.
+  if (types.size() <= index + 1)
+    return 0;
+
+  const llvm::DIType *paramType = stripTypeSugar(types[index + 1]);
+  const auto *ptr = dyn_cast_or_null<llvm::DIDerivedType>(paramType);
+  if (!ptr || ptr->getTag() != llvm::dwarf::DW_TAG_pointer_type)
+    return 0;
+
+  const llvm::DIType *pointee = stripTypeSugar(ptr->getBaseType());
+  if (!pointee)
+    return 0;
+  // A void* has no base type and an incomplete struct has no size; neither
+  // tells us how much to allocate.
+  return (pointee->getSizeInBits() + 7) / 8;
+}
+
+} // namespace
+
+ref<Expr> Executor::makeSymbolicArgument(ExecutionState &state, Function *f,
+                                         unsigned index,
+                                         const llvm::Argument &arg) {
+  std::string name = parameterNameFromDebugInfo(f, index);
+  if (name.empty() && arg.hasName())
+    name = arg.getName().str();
+  if (name.empty())
+    name = "arg" + llvm::utostr(index);
+
+  llvm::Type *type = arg.getType();
+  Instruction *allocSite = &*(f->begin()->begin());
+
+  if (!type->isPointerTy()) {
+    Expr::Width width = getWidthForLLVMType(type);
+    uint64_t size = (width + 7) / 8;
+    MemoryObject *mo =
+        memory->allocate(size, /*isLocal=*/false, /*isGlobal=*/false, &state,
+                         allocSite, /*alignment=*/8);
+    if (!mo)
+      klee_error("Could not allocate memory for symbolic argument '%s'",
+                 name.c_str());
+    mo->setName(name);
+    executeMakeSymbolic(state, mo, name);
+    const ObjectState *os = state.addressSpace.findObject(mo);
+    assert(os && "the object was just bound");
+    return os->read(0, width);
+  }
+
+  // A pointer parameter gets an object of the pointee's size, with symbolic
+  // contents, and the argument becomes that object's address. Only one level is
+  // initialised: a pointer stored *inside* that object is itself symbolic and
+  // will not resolve, which KLEE reports as a memory error rather than
+  // following silently.
+  uint64_t size = pointeeSizeFromDebugInfo(f, index);
+  if (size == 0) {
+    size = SymbolicPointeeSize;
+    klee_warning_once(
+        &arg,
+        "No debug information for the type '%s' points at; allocating %" PRIu64
+        " bytes. Compile with -g, or set --symbolic-pointee-size.",
+        name.c_str(), size);
+  }
+
+  MemoryObject *mo =
+      memory->allocate(size, /*isLocal=*/false, /*isGlobal=*/false, &state,
+                       allocSite, /*alignment=*/8);
+  if (!mo)
+    klee_error("Could not allocate %" PRIu64
+               " bytes for symbolic argument '%s'",
+               size, name.c_str());
+  mo->setName(name);
+  executeMakeSymbolic(state, mo, name);
+  return mo->getBaseExpr();
+}
+
+void Executor::runFunctionSymbolically(Function *f) {
+  // force deterministic initialization of memory objects
+  srand(1);
+  srandom(1);
+
+  KFunction *kf = kmodule->functionMap[f];
+  assert(kf);
+
+  if (f->isVarArg())
+    klee_warning("'%s' is variadic; only its declared parameters are made "
+                 "symbolic.",
+                 f->getName().str().c_str());
+
+  ExecutionState *state = new ExecutionState(kf, memory.get());
+
+  if (pathWriter)
+    state->pathOS = pathWriter->open();
+  if (symPathWriter)
+    state->symPathOS = symPathWriter->open();
+
+  if (statsTracker)
+    statsTracker->framePushed(*state, 0);
+
+  // Globals have to exist before an argument object can be allocated, because
+  // allocation records the state's address space.
+  initializeGlobals(*state);
+
+  unsigned index = 0;
+  for (const llvm::Argument &arg : f->args()) {
+    bindArgument(kf, index, *state,
+                 makeSymbolicArgument(*state, f, index, arg));
+    ++index;
+  }
+
+  executionTree = createExecutionTree(
+      *state, userSearcherRequiresInMemoryExecutionTree(), *interpreterHandler);
+  run(*state);
+  executionTree = nullptr;
+
+  // hack to clear memory objects
+  memory = std::make_unique<MemoryManager>(&arrayCache);
+
+  globalObjects.clear();
+  globalAddresses.clear();
+
+  if (statsTracker)
+    statsTracker->done();
+}
 
 void Executor::runFunctionAsMain(Function *f,
 				 int argc,

@@ -166,6 +166,11 @@ public:
                                  char **argv,
                                  char **envp) = 0;
 
+  /// Start execution at \p f with every parameter symbolic, rather than
+  /// passing argc/argv. This is what lets a function be analysed without a
+  /// hand-written harness that calls klee_make_symbolic for each argument.
+  virtual void runFunctionSymbolically(llvm::Function *f) = 0;
+
   /*** Runtime options ***/
 
   virtual void setHaltExecution(bool value) = 0;
