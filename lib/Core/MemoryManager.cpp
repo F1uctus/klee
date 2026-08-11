@@ -9,6 +9,7 @@
 
 #include "MemoryManager.h"
 
+#include "Context.h"
 #include "CoreStats.h"
 #include "ExecutionState.h"
 #include "Memory.h"
@@ -129,8 +130,45 @@ llvm::cl::opt<bool> NullOnZeroMalloc(
 } // namespace
 
 /***/
+namespace {
+/// Arena placement for modules whose pointers are narrower than the host's.
+///
+/// MemoryObject::getBaseExpr() builds the address at the module's pointer
+/// width, so for a 32bit module every address handed out has to fit in 32 bits
+/// or it is silently truncated and no longer resolves to its object. The
+/// default arenas total well over a terabyte and are placed wherever the kernel
+/// likes, so they cannot be used as-is.
+///
+/// This packs all four segments into the low 2 GiB. It starts at 64 MiB rather
+/// than 0 so that null and small-integer dereferences still fault instead of
+/// landing in the globals segment, and stops below 0x7FFE0000 because Windows
+/// maps KUSER_SHARED_DATA there in every process, at a fixed address that
+/// cannot be relocated. Staying under 2 GiB also keeps every address positive
+/// when a module treats a pointer as a signed 32bit integer.
+struct Segment32 {
+  std::uintptr_t start;
+  std::size_t size;
+};
+
+constexpr std::size_t MiB = 1024 * 1024;
+
+constexpr Segment32 globals32{0x04000000, 128 * MiB};   // ends at  192 MiB
+constexpr Segment32 constants32{0x0C000000, 128 * MiB}; // ends at  320 MiB
+constexpr Segment32 heap32{0x14000000, 1408 * MiB};     // ends at 1728 MiB
+constexpr Segment32 stack32{0x6C000000, 256 * MiB};     // ends at 1984 MiB
+} // namespace
+
 MemoryManager::MemoryManager(ArrayCache *_arrayCache)
-    : arrayCache(_arrayCache) {
+    : arrayCache(_arrayCache) {}
+
+void MemoryManager::initializeAllocators() {
+  if (allocatorsInitialized)
+    return;
+  allocatorsInitialized = true;
+
+  // Only meaningful once Context knows the module's pointer width.
+  const bool narrowPointers = Context::get().getPointerWidth() == 32;
+
   if (DeterministicAllocation) {
     if (DeterministicAllocationQuarantineSize ==
         kdalloc::Allocator::unlimitedQuarantine) {
@@ -147,40 +185,44 @@ MemoryManager::MemoryManager(ArrayCache *_arrayCache)
                            std::reference_wrapper<kdalloc::AllocatorFactory>,
                            kdalloc::Allocator *>>
         requestedSegments;
+
+    // An explicitly given option always wins; the narrow-pointer layout only
+    // replaces defaults that could not work for this module anyway.
+    auto segmentStart = [&](const llvm::cl::opt<std::uintptr_t> &option,
+                            const Segment32 &narrow) -> std::uintptr_t {
+      if (option.getNumOccurrences())
+        return option.getValue();
+      return narrowPointers ? narrow.start : 0;
+    };
+    auto segmentSize = [&](const llvm::cl::opt<unsigned> &option,
+                           const Segment32 &narrow) -> std::size_t {
+      if (option.getNumOccurrences() || !narrowPointers)
+        return static_cast<std::size_t>(option.getValue()) * 1024 * MiB;
+      return narrow.size;
+    };
+
+    if (narrowPointers)
+      klee_message("Deterministic allocator: module has 32bit pointers, "
+                   "placing all segments below 4 GiB");
+
     requestedSegments.emplace_back(
         "globals",
-        DeterministicAllocationGlobalsStartAddress
-            ? DeterministicAllocationGlobalsStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(
-            DeterministicAllocationGlobalsSize.getValue()) *
-            1024 * 1024 * 1024,
+        segmentStart(DeterministicAllocationGlobalsStartAddress, globals32),
+        segmentSize(DeterministicAllocationGlobalsSize, globals32),
         globalsFactory, &globalsAllocator);
     requestedSegments.emplace_back(
         "constants",
-        DeterministicAllocationConstantsStartAddress
-            ? DeterministicAllocationConstantsStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(
-            DeterministicAllocationConstantsSize.getValue()) *
-            1024 * 1024 * 1024,
+        segmentStart(DeterministicAllocationConstantsStartAddress, constants32),
+        segmentSize(DeterministicAllocationConstantsSize, constants32),
         constantsFactory, &constantsAllocator);
     requestedSegments.emplace_back(
-        "heap",
-        DeterministicAllocationHeapStartAddress
-            ? DeterministicAllocationHeapStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(DeterministicAllocationHeapSize.getValue()) *
-            1024 * 1024 * 1024,
-        heapFactory, nullptr);
+        "heap", segmentStart(DeterministicAllocationHeapStartAddress, heap32),
+        segmentSize(DeterministicAllocationHeapSize, heap32), heapFactory,
+        nullptr);
     requestedSegments.emplace_back(
-        "stack",
-        DeterministicAllocationStackStartAddress
-            ? DeterministicAllocationStackStartAddress.getValue()
-            : 0,
-        static_cast<std::size_t>(DeterministicAllocationStackSize.getValue()) *
-            1024 * 1024 * 1024,
-        stackFactory, nullptr);
+        "stack", segmentStart(DeterministicAllocationStackStartAddress, stack32),
+        segmentSize(DeterministicAllocationStackSize, stack32), stackFactory,
+        nullptr);
 
     // check invariants
     llvm::Align pageAlignment(pageSize);
@@ -206,11 +248,11 @@ MemoryManager::MemoryManager(ArrayCache *_arrayCache)
           std::uintptr_t end2 = start2 + size2;
           if (!(end1 <= start2 || start1 >= end2)) {
             klee_error("Deterministic allocator: Requested mapping for %s "
-                       "(start-address=0x%" PRIxPTR " size=%zu GiB) "
+                       "(start-address=0x%" PRIxPTR " size=%zu MiB) "
                        "overlaps with that for %s "
-                       "(start-address=0x%" PRIxPTR " size=%zu GiB)",
-                       segment1.c_str(), start1, size1 / (1024 * 1024 * 1024),
-                       segment2.c_str(), start2, size2 / (1024 * 1024 * 1024));
+                       "(start-address=0x%" PRIxPTR " size=%zu MiB)",
+                       segment1.c_str(), start1, size1 / MiB,
+                       segment2.c_str(), start2, size2 / MiB);
           }
         }
       }
@@ -228,9 +270,8 @@ MemoryManager::MemoryManager(ArrayCache *_arrayCache)
 
       if (!factory.get()) {
         klee_error("Deterministic allocator: Could not allocate mapping for %s "
-                   "(start-address=0x%" PRIxPTR " size=%zu GiB): %s",
-                   segment.c_str(), start, size / (1024 * 1024 * 1024),
-                   strerror(errno));
+                   "(start-address=0x%" PRIxPTR " size=%zu MiB)",
+                   segment.c_str(), start, size / MiB);
       }
       if (start && factory.get().getMapping().getBaseAddress() !=
                        reinterpret_cast<void *>(start)) {
@@ -245,11 +286,11 @@ MemoryManager::MemoryManager(ArrayCache *_arrayCache)
       }
 
       klee_message("Deterministic allocator: %s "
-                   "(start-address=0x%" PRIxPTR " size=%zu GiB)",
+                   "(start-address=0x%" PRIxPTR " size=%zu MiB)",
                    segment.c_str(),
                    reinterpret_cast<std::uintptr_t>(
                        factory.get().getMapping().getBaseAddress()),
-                   size / (1024 * 1024 * 1024));
+                   size / MiB);
       if (allocator) {
         *allocator = factory.get().makeAllocator();
       }

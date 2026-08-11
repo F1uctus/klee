@@ -597,6 +597,10 @@ Executor::setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
   Context::initialize(TD->isLittleEndian(),
                       (Expr::Width)TD->getPointerSizeInBits());
 
+  // The allocator arenas have to be placed within the module's address space,
+  // so they can only be reserved now that the pointer width is known.
+  memory->initializeAllocators();
+
   return kmodule->module.get();
 }
 

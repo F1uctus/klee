@@ -37,9 +37,18 @@ private:
   kdalloc::AllocatorFactory constantsFactory;
   kdalloc::Allocator constantsAllocator;
 
+  bool allocatorsInitialized = false;
+
 public:
   explicit MemoryManager(ArrayCache *arrayCache);
   ~MemoryManager();
+
+  /// Reserves the deterministic allocator's arenas.
+  ///
+  /// Separate from the constructor because the layout depends on the module's
+  /// pointer width, which is not known until Context has been initialized.
+  /// Idempotent, so callers do not have to track whether it has run.
+  void initializeAllocators();
 
   kdalloc::AllocatorFactory heapFactory;
   kdalloc::StackAllocatorFactory stackFactory;
