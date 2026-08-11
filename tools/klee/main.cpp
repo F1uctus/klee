@@ -844,6 +844,22 @@ std::string KleeHandler::getRunTimeLibraryPath(const char *argv0) {
 
   SmallString<128> libDir;
 
+  // Look for the runtime beside the executable before consulting any
+  // compiled-in absolute path. An installation that has been copied elsewhere
+  // keeps its internal layout but not the prefix it was configured with, and
+  // the checks below would then fall through to the build tree it was compiled
+  // in -- silently loading a different set of bitcode libraries, or none.
+  {
+    SmallString<128> relocatable(toolRoot);
+    llvm::sys::path::append(relocatable, "..", "lib", "klee", "runtime");
+    if (llvm::sys::fs::is_directory(relocatable)) {
+      KLEE_DEBUG_WITH_TYPE("klee_runtime", llvm::dbgs() <<
+                           "Using KLEE library runtime next to the binary: "
+                           << relocatable.c_str() << "\n");
+      return relocatable.c_str();
+    }
+  }
+
   if (strlen(KLEE_INSTALL_BIN_DIR) != 0 &&
       strlen(KLEE_INSTALL_RUNTIME_DIR) != 0 &&
 #if LLVM_VERSION_CODE >= LLVM_VERSION(16, 0)
