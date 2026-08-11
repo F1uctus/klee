@@ -10,15 +10,36 @@
 #ifndef KLEE_KTEST_H
 #define KLEE_KTEST_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+  /* Describes a pointer stored inside an object's bytes: at `offset` there is
+     a pointer to object `index`, `indexOffset` bytes into it.
+
+     Without this a consumer cannot tell a pointer from an integer that happens
+     to hold the same bits, so it cannot reconstruct a linked structure from a
+     test case. KLEEF introduced the field and UnitTestBot's renderer relies on
+     it. */
+  typedef struct Pointer Pointer;
+  struct Pointer {
+    uint64_t offset;
+    uint64_t index;
+    uint64_t indexOffset;
+  };
+
   typedef struct KTestObject KTestObject;
   struct KTestObject {
     char *name;
+    /* The address the object had during the run. A consumer matches a pointer
+       value against it to find which object was pointed at. */
+    uint64_t address;
     unsigned numBytes;
     unsigned char *bytes;
+    unsigned numPointers;
+    Pointer *pointers;
   };
   
   typedef struct KTest KTest;
@@ -34,6 +55,10 @@ extern "C" {
 
     unsigned numObjects;
     KTestObject *objects;
+
+    /* How many additional copies of each test the consumer should materialise
+       for uninitialised-memory variants. Zero means just the one. */
+    unsigned uninitCoeff;
   };
 
   

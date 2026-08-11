@@ -13,7 +13,11 @@
 #include <string.h>
 #include <stdio.h>
 
-#define KTEST_VERSION 3
+/* Version 4 adds each object's run-time address and the pointers stored inside
+   it, so that a consumer can tell a pointer from an integer with the same bits
+   and reconstruct a linked structure. Version 3 files still read: the added
+   fields are simply absent and left zero. */
+#define KTEST_VERSION 4
 #define KTEST_MAGIC_SIZE 5
 #define KTEST_MAGIC "KTEST"
 
@@ -37,6 +41,25 @@ static int write_uint32(FILE *f, unsigned value) {
   data[2] = value>> 8;
   data[3] = value>> 0;
   return fwrite(data, 1, 4, f)==4;
+}
+
+static int read_uint64(FILE *f, uint64_t *value_out) {
+  unsigned char data[8];
+  int i;
+  if (fread(data, 8, 1, f)!=1)
+    return 0;
+  *value_out = 0;
+  for (i = 0; i < 8; i++)
+    *value_out = (*value_out << 8) + data[i];
+  return 1;
+}
+
+static int write_uint64(FILE *f, uint64_t value) {
+  unsigned char data[8];
+  int i;
+  for (i = 0; i < 8; i++)
+    data[i] = (unsigned char)(value >> (8 * (7 - i)));
+  return fwrite(data, 1, 8, f)==8;
 }
 
 static int read_string(FILE *f, char **value_out) {
@@ -94,7 +117,7 @@ int kTest_isKTestFile(const char *path) {
 KTest *kTest_fromFile(const char *path) {
   FILE *f = fopen(path, "rb");
   KTest *res = 0;
-  unsigned i, version;
+  unsigned i, j, version;
 
   if (!f) 
     goto error;
@@ -144,6 +167,29 @@ KTest *kTest_fromFile(const char *path) {
     o->bytes = (unsigned char*) malloc(o->numBytes);
     if (fread(o->bytes, o->numBytes, 1, f)!=1)
       goto error;
+
+    if (version >= 4) {
+      if (!read_uint64(f, &o->address))
+        goto error;
+      if (!read_uint32(f, &o->numPointers))
+        goto error;
+      if (o->numPointers) {
+        o->pointers = (Pointer *) calloc(o->numPointers, sizeof(*o->pointers));
+        if (!o->pointers)
+          goto error;
+        for (j = 0; j < o->numPointers; j++) {
+          if (!read_uint64(f, &o->pointers[j].offset) ||
+              !read_uint64(f, &o->pointers[j].index) ||
+              !read_uint64(f, &o->pointers[j].indexOffset))
+            goto error;
+        }
+      }
+    }
+  }
+
+  if (version >= 4) {
+    if (!read_uint32(f, &res->uninitCoeff))
+      goto error;
   }
 
   fclose(f);
@@ -164,6 +210,8 @@ KTest *kTest_fromFile(const char *path) {
           free(bo->name);
         if (bo->bytes)
           free(bo->bytes);
+        if (bo->pointers)
+          free(bo->pointers);
       }
       free(res->objects);
     }
@@ -177,7 +225,7 @@ KTest *kTest_fromFile(const char *path) {
 
 int kTest_toFile(KTest *bo, const char *path) {
   FILE *f = fopen(path, "wb");
-  unsigned i;
+  unsigned i, j;
 
   if (!f) 
     goto error;
@@ -208,7 +256,20 @@ int kTest_toFile(KTest *bo, const char *path) {
       goto error;
     if (fwrite(o->bytes, o->numBytes, 1, f)!=1)
       goto error;
+    if (!write_uint64(f, o->address))
+      goto error;
+    if (!write_uint32(f, o->numPointers))
+      goto error;
+    for (j = 0; j < o->numPointers; j++) {
+      if (!write_uint64(f, o->pointers[j].offset) ||
+          !write_uint64(f, o->pointers[j].index) ||
+          !write_uint64(f, o->pointers[j].indexOffset))
+        goto error;
+    }
   }
+
+  if (!write_uint32(f, bo->uninitCoeff))
+    goto error;
 
   fclose(f);
 

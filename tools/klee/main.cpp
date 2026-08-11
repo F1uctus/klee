@@ -572,13 +572,21 @@ bool KleeHandler::writeTestCaseKTest(
   b.numObjects = out.size();
   b.objects = new KTestObject[b.numObjects];
   assert(b.objects);
+  // Version 4 of the format can describe where an object lived and which of its
+  // bytes are pointers into other objects. This interpreter initialises only
+  // the first level of a symbolic pointer, so there is never a graph of objects
+  // to describe; the fields are written empty rather than guessed at.
+  b.uninitCoeff = 0;
   for (unsigned i = 0; i < b.numObjects; i++) {
     KTestObject *o = &b.objects[i];
     o->name = const_cast<char *>(out[i].first.c_str());
+    o->address = 0;
     o->numBytes = out[i].second.size();
     o->bytes = new unsigned char[o->numBytes];
     assert(o->bytes);
     std::copy(out[i].second.begin(), out[i].second.end(), o->bytes);
+    o->numPointers = 0;
+    o->pointers = nullptr;
   }
   bool status = true;
   if (!kTest_toFile(&b,
