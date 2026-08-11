@@ -457,6 +457,10 @@ jobs:
             throw 'klee succeeded without the arm32 runtime -- it silently used another one'
           }
           Write-Host "klee correctly failed without the arm32 runtime (exit $code)"
+          # This step ends on a deliberately failed native command, and the
+          # shell takes its own exit status from $LASTEXITCODE, so the step
+          # would report the very failure it was checking for.
+          exit 0
 
       - name: Run the lit suite
         id: lit
