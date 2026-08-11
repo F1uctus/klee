@@ -198,6 +198,30 @@ bool releaseLazyCommit(void *base, std::size_t size) {
 }
 #endif
 
+int removeDirectorySymlink(const char *linkPath) {
+#if defined(_WIN32)
+  const DWORD attributes = ::GetFileAttributesA(linkPath);
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    errno = ENOENT;
+    return -1;
+  }
+
+  // A directory symlink has to go through RemoveDirectory; that removes the
+  // link itself rather than anything it points at, because of the reparse
+  // point. _unlink() would fail with EACCES.
+  if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
+    if (::RemoveDirectoryA(linkPath))
+      return 0;
+    errno = EACCES;
+    return -1;
+  }
+
+  return ::_unlink(linkPath);
+#else
+  return ::unlink(linkPath);
+#endif
+}
+
 int createDirectorySymlink(const char *target, const char *linkPath) {
 #if defined(_WIN32)
   // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE lets this succeed without

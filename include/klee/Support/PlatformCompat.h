@@ -152,6 +152,14 @@ inline int makeDirectory(const char *path, unsigned mode) {
 #endif
 }
 
+/// Removes a symbolic link previously created by createDirectorySymlink().
+/// Returns 0 on success, -1 on failure with errno set (ENOENT if absent).
+///
+/// This is not the same as removeFile(): on Windows a symlink to a directory is
+/// itself a directory as far as the API is concerned and has to be removed with
+/// RemoveDirectory, while _unlink() rejects it with EACCES.
+int removeDirectorySymlink(const char *linkPath);
+
 /// Creates \p linkPath as a symbolic link to the directory \p target. Returns 0
 /// on success and -1 on failure.
 ///
