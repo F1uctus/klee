@@ -41,6 +41,8 @@ std::size_t MemoryManager::pageSize = sysconf(_SC_PAGE_SIZE);
 
 bool MemoryManager::isDeterministic;
 
+constexpr std::size_t MiB = 1024 * 1024;
+
 llvm::cl::OptionCategory MemoryCat("Memory management options",
                                    "These options control memory management.");
 
@@ -56,25 +58,59 @@ llvm::cl::opt<bool> DeterministicAllocationMarkAsUnneeded(
                    "(default=true)"),
     llvm::cl::init(true), llvm::cl::cat(MemoryCat));
 
-llvm::cl::opt<unsigned> DeterministicAllocationGlobalsSize(
+/// Interprets a segment size with an optional unit: "512M", "2G", or a bare
+/// number, which stays GiB for compatibility with how these options have always
+/// been spelled.
+///
+/// GiB granularity alone cannot describe a 32bit layout. Such a module has
+/// under 2 GiB to work with, so four segments of at least a gibibyte each
+/// cannot be placed at all -- and firmware, which is the main reason to analyse
+/// a 32bit module, additionally needs them packed around fixed peripheral
+/// addresses that must stay clear.
+std::size_t parseSegmentSize(llvm::StringRef spelling, const char *flag) {
+  static const std::pair<llvm::StringRef, std::size_t> units[] = {
+      {"GiB", 1024 * MiB}, {"G", 1024 * MiB}, {"MiB", MiB}, {"M", MiB}};
+
+  llvm::StringRef number = spelling;
+  std::size_t unit = 1024 * MiB;
+  for (const auto &[suffix, multiplier] : units) {
+    if (spelling.size() > suffix.size() && spelling.ends_with(suffix)) {
+      number = spelling.drop_back(suffix.size());
+      unit = multiplier;
+      break;
+    }
+  }
+
+  std::size_t value = 0;
+  if (number.getAsInteger(10, value) || value == 0)
+    klee_error("%s: '%s' is not a size; expected e.g. 512M or 2G", flag,
+               spelling.str().c_str());
+  return value * unit;
+}
+
+llvm::cl::opt<std::string> DeterministicAllocationGlobalsSize(
     "kdalloc-globals-size",
-    llvm::cl::desc("Reserved memory for globals in GiB (default=10)"),
-    llvm::cl::init(10), llvm::cl::cat(MemoryCat));
+    llvm::cl::desc("Reserved memory for globals, e.g. 128M or 10G (default=10G)"),
+    llvm::cl::value_desc("size"), llvm::cl::init("10G"),
+    llvm::cl::cat(MemoryCat));
 
-llvm::cl::opt<unsigned> DeterministicAllocationConstantsSize(
+llvm::cl::opt<std::string> DeterministicAllocationConstantsSize(
     "kdalloc-constants-size",
-    llvm::cl::desc("Reserved memory for constant globals in GiB (default=10)"),
-    llvm::cl::init(10), llvm::cl::cat(MemoryCat));
+    llvm::cl::desc("Reserved memory for constant globals, e.g. 128M or 10G (default=10G)"),
+    llvm::cl::value_desc("size"), llvm::cl::init("10G"),
+    llvm::cl::cat(MemoryCat));
 
-llvm::cl::opt<unsigned> DeterministicAllocationHeapSize(
+llvm::cl::opt<std::string> DeterministicAllocationHeapSize(
     "kdalloc-heap-size",
-    llvm::cl::desc("Reserved memory for heap in GiB (default=1024)"),
-    llvm::cl::init(1024), llvm::cl::cat(MemoryCat));
+    llvm::cl::desc("Reserved memory for heap, e.g. 1408M or 1024G (default=1024G)"),
+    llvm::cl::value_desc("size"), llvm::cl::init("1024G"),
+    llvm::cl::cat(MemoryCat));
 
-llvm::cl::opt<unsigned> DeterministicAllocationStackSize(
+llvm::cl::opt<std::string> DeterministicAllocationStackSize(
     "kdalloc-stack-size",
-    llvm::cl::desc("Reserved memory for stack in GiB (default=100)"),
-    llvm::cl::init(128), llvm::cl::cat(MemoryCat));
+    llvm::cl::desc("Reserved memory for stack, e.g. 256M or 128G (default=128G)"),
+    llvm::cl::value_desc("size"), llvm::cl::init("128G"),
+    llvm::cl::cat(MemoryCat));
 
 llvm::cl::opt<std::uintptr_t> DeterministicAllocationGlobalsStartAddress(
     "kdalloc-globals-start-address",
@@ -150,7 +186,6 @@ struct Segment32 {
   std::size_t size;
 };
 
-constexpr std::size_t MiB = 1024 * 1024;
 
 constexpr Segment32 globals32{0x04000000, 128 * MiB};   // ends at  192 MiB
 constexpr Segment32 constants32{0x0C000000, 128 * MiB}; // ends at  320 MiB
@@ -194,10 +229,11 @@ void MemoryManager::initializeAllocators() {
         return option.getValue();
       return narrowPointers ? narrow.start : 0;
     };
-    auto segmentSize = [&](const llvm::cl::opt<unsigned> &option,
+    auto segmentSize = [&](const llvm::cl::opt<std::string> &option,
+                           const char *flag,
                            const Segment32 &narrow) -> std::size_t {
       if (option.getNumOccurrences() || !narrowPointers)
-        return static_cast<std::size_t>(option.getValue()) * 1024 * MiB;
+        return parseSegmentSize(option.getValue(), flag);
       return narrow.size;
     };
 
@@ -208,20 +244,20 @@ void MemoryManager::initializeAllocators() {
     requestedSegments.emplace_back(
         "globals",
         segmentStart(DeterministicAllocationGlobalsStartAddress, globals32),
-        segmentSize(DeterministicAllocationGlobalsSize, globals32),
+        segmentSize(DeterministicAllocationGlobalsSize, "kdalloc-globals-size", globals32),
         globalsFactory, &globalsAllocator);
     requestedSegments.emplace_back(
         "constants",
         segmentStart(DeterministicAllocationConstantsStartAddress, constants32),
-        segmentSize(DeterministicAllocationConstantsSize, constants32),
+        segmentSize(DeterministicAllocationConstantsSize, "kdalloc-constants-size", constants32),
         constantsFactory, &constantsAllocator);
     requestedSegments.emplace_back(
         "heap", segmentStart(DeterministicAllocationHeapStartAddress, heap32),
-        segmentSize(DeterministicAllocationHeapSize, heap32), heapFactory,
+        segmentSize(DeterministicAllocationHeapSize, "kdalloc-heap-size", heap32), heapFactory,
         nullptr);
     requestedSegments.emplace_back(
         "stack", segmentStart(DeterministicAllocationStackStartAddress, stack32),
-        segmentSize(DeterministicAllocationStackSize, stack32), stackFactory,
+        segmentSize(DeterministicAllocationStackSize, "kdalloc-stack-size", stack32), stackFactory,
         nullptr);
 
     // check invariants
