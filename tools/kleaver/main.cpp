@@ -33,6 +33,10 @@
 #include "llvm/Support/Signals.h"
 
 #include <sys/stat.h>
+#ifndef _WIN32
+// getuid()/getgid(), used by the ownership check in getQueryLogPath().
+#include <unistd.h>
+#endif
 #include <utility>
 
 using namespace llvm;
