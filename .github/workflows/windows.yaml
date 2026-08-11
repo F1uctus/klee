@@ -1,0 +1,407 @@
+---
+name: Windows
+
+# The Windows build is native: MSVC ABI, no WSL, MSYS or Cygwin anywhere in the
+# toolchain or the result. It links a prebuilt LLVM release rather than building
+# one, which is what keeps a full run inside a normal Actions budget.
+
+on:
+  push:
+    branches:
+      - win-native
+      - 'ci/**'
+  pull_request:
+    branches:
+      - win-native
+      - master
+  workflow_dispatch:
+
+env:
+  # LLVM reads bitcode from its own version or older, never newer, so this
+  # number is the upper end of the distribution's version contract. 22.1.8 is
+  # the release the Linux regression check in #2 also used.
+  LLVM_VERSION: 22.1.8
+  Z3_VERSION: 4.16.0
+  # lit's default of one worker per core is far too aggressive for KLEE, which
+  # is memory-hungry: on a 4-core/16 GB runner the tail of the suite starts
+  # failing on commit exhaustion rather than on anything real. See #5.
+  LIT_WORKERS: 2
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: x86-64 native
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out KLEE
+        uses: actions/checkout@v4
+
+      - name: Set up the MSVC toolchain
+        run: |
+          # vcvars64.bat is the only supported way to get a working MSVC
+          # environment, and it only speaks cmd. Run it, ask cmd for the
+          # resulting environment, and replay that into the job so every later
+          # step inherits the linker, the CRT and VSINSTALLDIR -- the last of
+          # which CMakeLists.txt needs to repoint LLVM's stale diaguids.lib.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path -LiteralPath $vswhere)) {
+            throw "vswhere.exe not found at $vswhere"
+          }
+          $vsPath = & $vswhere -latest -products '*' `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsPath) { throw 'No Visual Studio install with the C++ toolchain' }
+          $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
+          Write-Host "Using $vcvars"
+
+          $lines = & "${env:COMSPEC}" /s /c "`"$vcvars`" >nul 2>&1 && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed ($LASTEXITCODE)" }
+
+          $count = 0
+          foreach ($line in $lines) {
+            if ($line -notmatch '^([^=]+)=(.*)$') { continue }
+            $name = $Matches[1]
+            $value = $Matches[2]
+            # Never replay the runner's own bookkeeping back at itself.
+            if ($name -match '^(GITHUB_|RUNNER_|ACTIONS_|INPUT_)') { continue }
+            "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $count++
+          }
+          Write-Host "Exported $count environment variables"
+
+      - name: Cache the LLVM release
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          # Only the tarball is cached, not the unpacked tree. Unpacked it is
+          # several GB, which would consume most of the repository's 10 GB
+          # cache allowance for a saving smaller than the unpack itself.
+          path: ${{ github.workspace }}\..\deps\llvm.tar.xz
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc
+
+      - name: Download the LLVM release
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: |
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          New-Item -ItemType Directory -Path $deps -Force | Out-Null
+          $name = "clang+llvm-${env:LLVM_VERSION}-x86_64-pc-windows-msvc.tar.xz"
+          $url = "https://github.com/llvm/llvm-project/releases/download/" +
+                 "llvmorg-${env:LLVM_VERSION}/" + [uri]::EscapeDataString($name)
+          Write-Host "Fetching $url"
+          curl.exe --fail --location --silent --show-error `
+            --output (Join-Path $deps 'llvm.tar.xz') $url
+
+      - name: Unpack LLVM
+        run: |
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          $root = Join-Path $deps 'llvm'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          # bsdtar ships with Windows and handles .tar.xz natively.
+          tar.exe -x -f (Join-Path $deps 'llvm.tar.xz') -C $root --strip-components=1
+          if ($LASTEXITCODE -ne 0) { throw "unpacking LLVM failed ($LASTEXITCODE)" }
+          $config = Join-Path $root 'lib\cmake\llvm\LLVMConfig.cmake'
+          if (-not (Test-Path -LiteralPath $config)) {
+            throw "The LLVM release did not contain $config"
+          }
+          "LLVM_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "LLVM at $root"
+
+      - name: Cache Z3
+        id: z3-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\..\deps\z3.zip
+          key: z3-${{ env.Z3_VERSION }}-x64-win
+
+      - name: Download Z3
+        if: steps.z3-cache.outputs.cache-hit != 'true'
+        run: |
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          New-Item -ItemType Directory -Path $deps -Force | Out-Null
+          $url = "https://github.com/Z3Prover/z3/releases/download/" +
+                 "z3-${env:Z3_VERSION}/z3-${env:Z3_VERSION}-x64-win.zip"
+          Write-Host "Fetching $url"
+          curl.exe --fail --location --silent --show-error `
+            --output (Join-Path $deps 'z3.zip') $url
+
+      - name: Unpack Z3
+        run: |
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          Expand-Archive -LiteralPath (Join-Path $deps 'z3.zip') `
+                         -DestinationPath $deps -Force
+          $root = Join-Path $deps "z3-${env:Z3_VERSION}-x64-win"
+          # The Windows package keeps the import library in bin\, not lib\.
+          foreach ($f in @('bin\libz3.lib', 'bin\libz3.dll', 'include\z3.h')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $f))) {
+              throw "The Z3 package did not contain $f"
+            }
+          }
+          "Z3_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Z3 at $root"
+
+      - name: Install lit
+        run: |
+          # tabulate is what klee-stats needs for its table output; without it
+          # the klee-stats lit cases fail for a reason unrelated to KLEE.
+          python -m pip install --disable-pip-version-check --quiet lit tabulate
+          python -c "import lit; print('lit', lit.__version__)"
+          $lit = (Get-Command lit -ErrorAction Stop).Source
+          "LIT_TOOL=$lit" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "lit at $lit"
+
+      - name: Report the toolchain
+        run: |
+          Write-Host "=== versions ==="
+          & "$env:LLVM_ROOT\bin\clang-cl.exe" --version
+          cmake --version | Select-Object -First 1
+          ninja --version
+          Write-Host "=== disk ==="
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Used -ne $null } |
+            Select-Object Name,
+              @{n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) }},
+              @{n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) }} |
+            Format-Table | Out-String | Write-Host
+
+      - name: Configure
+        run: |
+          # clang-cl rather than cl: it is the exact compiler that produced the
+          # LLVM release being linked, and it accepts the GCC-style warning
+          # flags cmake/compiler_warnings.cmake adds unconditionally.
+          #
+          # The prebuilt LLVM is /MT, so KLEE must match or the two CRTs
+          # collide at link time. Matching also means no KLEE binary needs a
+          # redistributable -- only libz3.dll, which is /MD, does.
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER="$env:LLVM_ROOT/bin/clang-cl.exe" `
+            -DCMAKE_CXX_COMPILER="$env:LLVM_ROOT/bin/clang-cl.exe" `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DLLVM_DIR="$env:LLVM_ROOT/lib/cmake/llvm" `
+            -DZ3_INCLUDE_DIRS="$env:Z3_ROOT/include" `
+            -DZ3_LIBRARIES="$env:Z3_ROOT/bin/libz3.lib" `
+            -DENABLE_SOLVER_Z3=ON `
+            -DENABLE_SOLVER_STP=OFF `
+            -DENABLE_SOLVER_METASMT=OFF `
+            -DENABLE_POSIX_RUNTIME=OFF `
+            -DENABLE_KLEE_UCLIBC=OFF `
+            -DENABLE_KLEE_LIBCXX=OFF `
+            -DENABLE_UNIT_TESTS=OFF `
+            -DENABLE_SYSTEM_TESTS=ON `
+            -DKLEE_RUNTIME_BUILD_TYPE=Release `
+            -DLIT_TOOL="$env:LIT_TOOL" `
+            -DLIT_ARGS="-v;-s;-j$env:LIT_WORKERS"
+          if ($LASTEXITCODE -ne 0) { throw "configure failed ($LASTEXITCODE)" }
+
+      - name: Build
+        run: |
+          cmake --build build --parallel
+          if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+
+      - name: Check the import surface
+        run: |
+          # The distribution's whole point is that it depends on nothing outside
+          # Windows itself. Anything from an emulation layer here means that
+          # goal was missed, so fail rather than warn. See #4.
+          $objdump = "$env:LLVM_ROOT\bin\llvm-objdump.exe"
+          $banned = @('msys-', 'cygwin1.dll', 'libwinpthread')
+          $bad = @()
+          foreach ($exe in Get-ChildItem build\bin\*.exe) {
+            $imports = & $objdump -p $exe.FullName |
+              Select-String '^\s+DLL Name: (.+)$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+            Write-Host "$($exe.Name): $($imports -join ', ')"
+            foreach ($imp in $imports) {
+              foreach ($pattern in $banned) {
+                if ($imp -like "*$pattern*") { $bad += "$($exe.Name) imports $imp" }
+              }
+              # KLEE is built /MT, so a dynamic CRT import means the static CRT
+              # setting silently failed to apply to that target.
+              if ($imp -match '^(msvcp140|vcruntime140)') {
+                $bad += "$($exe.Name) imports $imp -- static CRT did not take"
+              }
+            }
+          }
+          if ($bad) { throw ($bad -join "`n") }
+          Write-Host 'Import surface is clean.'
+
+      - name: Smoke test -- native x86-64
+        run: |
+          $bin = "$PWD\build\bin"
+          $out = "$PWD\smoke\native"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          & "$env:LLVM_ROOT\bin\clang.exe" -emit-llvm -c -g -O0 `
+            -Xclang -disable-O0-optnone -I include `
+            scripts\ci\cortex-m-smoke.c -o "$out\smoke.bc"
+          if ($LASTEXITCODE -ne 0) { throw 'compiling the native fixture failed' }
+
+          & "$bin\klee.exe" --output-dir="$out\klee-out" `
+            --entry-point=smoke_entry "$out\smoke.bc"
+          if ($LASTEXITCODE -ne 0) { throw "klee failed ($LASTEXITCODE)" }
+
+          $tests = @(Get-ChildItem "$out\klee-out\*.ktest")
+          Write-Host "native: $($tests.Count) test cases"
+          if ($tests.Count -lt 4) {
+            throw "expected at least 4 test cases from the fixture, got $($tests.Count)"
+          }
+
+      - name: Smoke test -- Cortex-M M0, M4 and M7
+        run: |
+          # All Cortex-M profiles share one LLVM data layout, so a single arm32
+          # runtime is expected to serve every one of them. Running all three
+          # against the same source is what confirms that rather than assumes
+          # it. See #3.
+          $bin = "$PWD\build\bin"
+          $triples = @{
+            'm0' = 'thumbv6m-none-eabi'
+            'm4' = 'thumbv7em-none-eabi'
+            'm7' = 'thumbv7em-none-eabihf'
+          }
+          $counts = @{}
+          foreach ($cpu in 'm0', 'm4', 'm7') {
+            $out = "$PWD\smoke\$cpu"
+            New-Item -ItemType Directory -Path $out -Force | Out-Null
+            & "$env:LLVM_ROOT\bin\clang.exe" "--target=$($triples[$cpu])" `
+              -emit-llvm -c -g -O0 -Xclang -disable-O0-optnone `
+              -ffreestanding -I include `
+              scripts\ci\cortex-m-smoke.c -o "$out\smoke.bc"
+            if ($LASTEXITCODE -ne 0) { throw "compiling for $cpu failed" }
+
+            # An x86-64 host cannot JIT-call an ARM-ABI function, so external
+            # calls have to be answered from bitcode or not at all.
+            & "$bin\klee.exe" --libc=klee --external-calls=none `
+              --output-dir="$out\klee-out" `
+              --entry-point=smoke_entry "$out\smoke.bc"
+            if ($LASTEXITCODE -ne 0) { throw "klee failed for $cpu ($LASTEXITCODE)" }
+
+            $counts[$cpu] = @(Get-ChildItem "$out\klee-out\*.ktest").Count
+            Write-Host "$cpu : $($counts[$cpu]) test cases"
+          }
+          if ($counts['m0'] -lt 4) {
+            throw "expected at least 4 test cases for m0, got $($counts['m0'])"
+          }
+          # Identical sources through identical data layouts must explore
+          # identically. A divergence means the profiles are not in fact
+          # interchangeable, which is the assumption the single arm32 runtime
+          # rests on.
+          if ($counts['m0'] -ne $counts['m4'] -or $counts['m0'] -ne $counts['m7']) {
+            throw ("Cortex-M profiles diverged: " +
+                   "m0=$($counts['m0']) m4=$($counts['m4']) m7=$($counts['m7'])")
+          }
+          Write-Host 'All three Cortex-M profiles explored identically.'
+
+      - name: Confirm the arm32 runtime is the one being loaded
+        run: |
+          # The fallback to the "64" runtime is silent, so a successful ARM run
+          # does not by itself prove the arm32 bitcode was used. Move it aside
+          # and require the same command to fail. See #3.
+          $bca = 'build\runtime\lib\libkleeRuntimeKLEELibcarm32_Release.bca'
+          if (-not (Test-Path -LiteralPath $bca)) {
+            throw "$bca was never built"
+          }
+          Rename-Item -LiteralPath $bca -NewName 'moved-aside.bca'
+          try {
+            & "$PWD\build\bin\klee.exe" --libc=klee --external-calls=none `
+              --output-dir="$PWD\smoke\negative" `
+              --entry-point=smoke_entry "$PWD\smoke\m0\smoke.bc" 2>&1 |
+              Out-String | Write-Host
+            $code = $LASTEXITCODE
+          } finally {
+            Rename-Item -LiteralPath 'build\runtime\lib\moved-aside.bca' `
+                        -NewName 'libkleeRuntimeKLEELibcarm32_Release.bca'
+          }
+          if ($code -eq 0) {
+            throw 'klee succeeded without the arm32 runtime -- it silently used another one'
+          }
+          Write-Host "klee correctly failed without the arm32 runtime (exit $code)"
+
+      - name: Run the lit suite
+        id: lit
+        continue-on-error: true
+        run: |
+          cmake --build build --target systemtests 2>&1 | Tee-Object -Variable output
+          $summary = $output | Select-String '^\s*(Passed|Failed|Unsupported|Expectedly Failed|Timed Out|Unresolved)\s*:\s*(\d+)'
+          $results = @{}
+          foreach ($m in $summary) {
+            $results[$m.Matches[0].Groups[1].Value] = [int]$m.Matches[0].Groups[2].Value
+          }
+          $passed = if ($results.ContainsKey('Passed')) { $results['Passed'] } else { 0 }
+          "passed=$passed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $results.GetEnumerator() | Sort-Object Name |
+            ForEach-Object { Write-Host "$($_.Name): $($_.Value)" }
+
+      - name: Check the lit suite did not regress
+        run: |
+          # A large part of the suite fails for reasons that are not bugs -- it
+          # assumes a POSIX shell, the POSIX runtime, klee-uclibc, or tools this
+          # build deliberately excludes -- so an absolute pass count is the only
+          # honest gate until those are triaged. #5 recorded 219 passing at
+          # -j3 on a 12-core/7.7 GB box; this runner has fewer cores and more
+          # memory per core, so the floor is set below that with headroom.
+          $floor = 200
+          $passed = [int]'${{ steps.lit.outputs.passed }}'
+          Write-Host "lit passed $passed tests (floor $floor)"
+          if ($passed -lt $floor) {
+            throw "lit regressed: $passed passing, expected at least $floor"
+          }
+
+      - name: Package the portable distribution
+        run: |
+          ./scripts/package-win.ps1 `
+            -BuildDir build `
+            -OutDir dist/klee-win64 `
+            -Z3Dll "$env:Z3_ROOT/bin/libz3.dll"
+          if ($LASTEXITCODE -ne 0) { throw 'packaging failed' }
+
+      - name: Verify the distribution is relocatable
+        run: |
+          # As originally packaged the distribution only worked because
+          # klee-env.cmd exported KLEE_RUNTIME_LIBRARY_PATH; without it klee.exe
+          # fell through to the compiled-in build directory and would have
+          # broken silently on any other machine. Reproduce the conditions that
+          # caught that: move the package, drop the variable, cut PATH back to
+          # the package's own bin plus System32, and rename the build tree's
+          # runtime directory away so a fallback to it cannot pass. See #4.
+          $moved = Join-Path ([System.IO.Path]::GetTempPath()) 'klee-relocated'
+          if (Test-Path -LiteralPath $moved) { Remove-Item $moved -Recurse -Force }
+          Copy-Item -LiteralPath dist/klee-win64 -Destination $moved -Recurse
+
+          Rename-Item -LiteralPath build\runtime\lib -NewName lib-hidden
+          try {
+            $env:KLEE_RUNTIME_LIBRARY_PATH = $null
+            $savedPath = $env:PATH
+            $env:PATH = "$moved\bin;$env:SystemRoot\System32"
+
+            $out = Join-Path $moved 'relocated-out'
+            & "$moved\bin\klee.exe" --libc=klee --external-calls=none `
+              --output-dir=$out --entry-point=smoke_entry "$PWD\smoke\m0\smoke.bc"
+            $code = $LASTEXITCODE
+            $env:PATH = $savedPath
+          } finally {
+            Rename-Item -LiteralPath build\runtime\lib-hidden -NewName lib
+          }
+          if ($code -ne 0) {
+            throw "the relocated distribution failed to run ($code)"
+          }
+          $tests = @(Get-ChildItem "$out\*.ktest")
+          Write-Host "relocated distribution produced $($tests.Count) test cases"
+          if ($tests.Count -lt 4) {
+            throw "relocated run produced $($tests.Count) test cases, expected at least 4"
+          }
+
+      - name: Show the manifest
+        run: Get-Content dist/klee-win64/MANIFEST.txt | Write-Host
+
+      - name: Upload the portable distribution
+        uses: actions/upload-artifact@v4
+        with:
+          name: klee-win64-llvm${{ env.LLVM_VERSION }}
+          path: dist/klee-win64
+          if-no-files-found: error
+          retention-days: 30
