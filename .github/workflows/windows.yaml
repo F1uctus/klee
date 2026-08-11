@@ -225,6 +225,42 @@ jobs:
           "Z3_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Z3 at $root"
 
+      - name: Build SQLite3
+        run: |
+          # KLEE requires SQLite3 for its statistics database, and Windows has
+          # no system copy. The amalgamation is a single translation unit, so
+          # building it here takes seconds and avoids depending on a package
+          # manager's idea of which CRT it was built against -- which matters,
+          # because it has to match the /MT that the prebuilt LLVM forces.
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          $version = '3530400'
+          $zip = Join-Path $deps 'sqlite.zip'
+          curl.exe --fail --location --silent --show-error --output $zip `
+            "https://www.sqlite.org/2026/sqlite-amalgamation-$version.zip"
+
+          $expected = '1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d'
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "sqlite amalgamation hash mismatch`nexpected $expected`ngot      $actual"
+          }
+
+          Expand-Archive -LiteralPath $zip -DestinationPath $deps -Force
+          $src = Join-Path $deps "sqlite-amalgamation-$version"
+
+          Push-Location $src
+          try {
+            & "$env:LLVM_ROOT\bin\clang-cl.exe" /nologo /c /MT /O2 /DNDEBUG `
+              /DSQLITE_ENABLE_COLUMN_METADATA sqlite3.c
+            if ($LASTEXITCODE -ne 0) { throw 'compiling sqlite3.c failed' }
+            & "$env:LLVM_ROOT\bin\llvm-lib.exe" /nologo /out:sqlite3.lib sqlite3.obj
+            if ($LASTEXITCODE -ne 0) { throw 'archiving sqlite3.lib failed' }
+          } finally {
+            Pop-Location
+          }
+
+          "SQLITE_ROOT=$src" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "SQLite3 $version at $src"
+
       - name: Install lit
         run: |
           # tabulate is what klee-stats needs for its table output; without it
@@ -267,6 +303,8 @@ jobs:
             -DLLVM_DIR="$env:LLVM_ROOT/lib/cmake/llvm" `
             -DZ3_INCLUDE_DIRS="$env:Z3_ROOT/include" `
             -DZ3_LIBRARIES="$env:Z3_ROOT/bin/libz3.lib" `
+            -DSQLite3_INCLUDE_DIR="$env:SQLITE_ROOT" `
+            -DSQLite3_LIBRARY="$env:SQLITE_ROOT/sqlite3.lib" `
             -DENABLE_SOLVER_Z3=ON `
             -DENABLE_SOLVER_STP=OFF `
             -DENABLE_SOLVER_METASMT=OFF `
