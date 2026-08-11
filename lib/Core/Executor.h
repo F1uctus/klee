@@ -242,6 +242,11 @@ private:
                             KCallable *callable,
                             std::vector< ref<Expr> > &arguments);
 
+  /// Answers an external call with a fresh symbolic value of its return type
+  /// instead of dispatching it. Returns false if the state was terminated.
+  bool mockExternalCall(ExecutionState &state, KInstruction *target,
+                        KCallable *callable, const char *reason);
+
   ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
                                  bool isLocal, const Array *array = 0);
 

@@ -3972,6 +3972,49 @@ static std::set<std::string> okExternals(okExternalsList,
                                          okExternalsList + 
                                          (sizeof(okExternalsList)/sizeof(okExternalsList[0])));
 
+bool Executor::mockExternalCall(ExecutionState &state, KInstruction *target,
+                                KCallable *callable, const char *reason) {
+  const std::string name = callable->getName().str();
+  Type *resultType = target->inst->getType();
+
+  klee_warning_once(callable->getValue(),
+                    "%s: %s, returning a symbolic value instead", name.c_str(),
+                    reason);
+
+  if (resultType->isVoidTy())
+    // Nothing observable came back, and mocking does not model what the call
+    // might have done to its arguments, so there is nothing to invent.
+    return true;
+
+  if (!resultType->isSized()) {
+    terminateStateOnExecError(
+        state, "cannot mock " + name + ": its return type has no size");
+    return false;
+  }
+
+  Expr::Width width = getWidthForLLVMType(resultType);
+  uint64_t size = (width + 7) / 8;
+
+  MemoryObject *mo = memory->allocate(size, /*isLocal=*/true, /*isGlobal=*/false,
+                                      &state, target->inst,
+                                      /*alignment=*/8);
+  if (!mo) {
+    terminateStateOnExecError(state, "out of memory while mocking " + name);
+    return false;
+  }
+
+  // The test case reports the object under the memory object's name, not the
+  // array's, so without this every mocked value comes out as "unnamed" and the
+  // .ktest cannot be read back against the call it came from.
+  mo->setName(name);
+  executeMakeSymbolic(state, mo, name);
+
+  const ObjectState *os = state.addressSpace.findObject(mo);
+  assert(os && "the object was just bound");
+  bindLocal(target, state, os->read(0, width));
+  return true;
+}
+
 void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
                                     KCallable *callable,
                                     std::vector<ref<Expr>> &arguments) {
@@ -3983,6 +4026,14 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
   if (ExternalCalls == ExternalCallPolicy::None &&
       !okExternals.count(callable->getName().str())) {
+    // Refusing external calls is the only workable policy for a module built
+    // for another architecture, since the host cannot call into it at all. That
+    // makes this the normal path for firmware rather than an error case, so
+    // --mock-policy=failed answers the call instead of killing the state.
+    if (interpreterOpts.Mock == MockPolicy::Failed) {
+      mockExternalCall(state, target, callable, "external calls are disallowed");
+      return;
+    }
     klee_warning("Disallowed call to external function: %s\n",
                  callable->getName().str().c_str());
     terminateStateOnUserError(state, "external calls disallowed");
@@ -4106,6 +4157,10 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
 
   bool success = externalDispatcher->executeCall(callable, target->inst, args);
   if (!success) {
+    if (interpreterOpts.Mock == MockPolicy::Failed) {
+      mockExternalCall(state, target, callable, "the external call failed");
+      return;
+    }
     terminateStateOnExecError(state,
                               "failed external call: " + callable->getName(),
                               StateTerminationType::External);

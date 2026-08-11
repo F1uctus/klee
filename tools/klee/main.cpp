@@ -13,6 +13,7 @@
 #include "klee/ADT/TreeStream.h"
 #include "klee/Config/Version.h"
 #include "klee/Core/Interpreter.h"
+#include "klee/Core/MockBuilder.h"
 #include "klee/Expr/Expr.h"
 #include "klee/Solver/SolverCmdLine.h"
 #include "klee/Statistics/Statistics.h"
@@ -295,6 +296,44 @@ namespace {
            cl::desc("Link the llvm libc++ library into the bitcode (default=false)"),
            cl::init(false),
            cl::cat(LinkCat));
+
+  /*** External call mocking options ***/
+
+  cl::OptionCategory
+      MockCat("Mocking options",
+              "These options control how external calls are answered when they "
+              "are not dispatched to the host.");
+
+  cl::opt<MockPolicy> Mock(
+      "mock-policy",
+      cl::desc("Specify the policy for mocking external calls (default=none)"),
+      cl::values(
+          clEnumValN(MockPolicy::None, "none", "No mocking (default)"),
+          clEnumValN(MockPolicy::Failed, "failed",
+                     "Answer an external call with a symbolic value when it "
+                     "could not be dispatched, instead of terminating the "
+                     "state"),
+          clEnumValN(MockPolicy::All, "all",
+                     "Synthesise a symbolic-returning definition for every "
+                     "external the module declares, before execution starts")),
+      cl::init(MockPolicy::None), cl::cat(MockCat));
+
+  cl::opt<MockStrategyKind> MockStrategy(
+      "mock-strategy",
+      cl::desc("Specify what a mocked call returns (default=naive)"),
+      cl::values(
+          clEnumValN(MockStrategyKind::Naive, "naive",
+                     "A fresh symbolic value for each call (default)"),
+          clEnumValN(MockStrategyKind::Deterministic, "deterministic",
+                     "Treat the function as uninterpreted, so equal arguments "
+                     "give equal results. Not supported by this build.")),
+      cl::init(MockStrategyKind::Naive), cl::cat(MockCat));
+
+  cl::list<std::string> MockModeledFunctions(
+      "mock-modeled-functions",
+      cl::desc("Do not mock these functions even though they are external; "
+               "KLEE models them itself. May be given more than once."),
+      cl::cat(MockCat));
 
   /*** Test-Comp specific options ***/
 
@@ -892,6 +931,7 @@ static const char *modelledExternals[] = {
   "klee_get_value_i64",
   "klee_get_obj_size",
   "klee_is_symbolic",
+  "klee_make_mock",
   "klee_make_symbolic",
   "klee_mark_global",
   "klee_open_merge",
@@ -1495,6 +1535,34 @@ int main(int argc, char **argv, char **envp) {
                  errorMsg.c_str());
   }
 
+  Interpreter::InterpreterOptions IOpts;
+  IOpts.MakeConcreteSymbolic = MakeConcreteSymbolic;
+  IOpts.Mock = Mock;
+  IOpts.MockStrategy = MockStrategy;
+
+  if (Mock == MockPolicy::All) {
+    // Everything that will be resolved by linking, or that KLEE models itself,
+    // must not be mocked -- a synthesised body would shadow the real one. The
+    // runtime libraries are still separate modules at this point, so their
+    // definitions are collected here rather than after linking.
+    std::set<std::string> ignored(modelledExternals,
+                                  modelledExternals + NELEMS(modelledExternals));
+    ignored.insert(MockModeledFunctions.begin(), MockModeledFunctions.end());
+    for (const auto &module : loadedModules) {
+      for (const auto &f : module->functions()) {
+        if (!f.isDeclaration())
+          ignored.insert(f.getName().str());
+      }
+    }
+
+    MockBuilder builder(mainModule, Opts, IOpts, ignored);
+    if (auto mocks = builder.build()) {
+      loadedModules.push_back(std::move(mocks));
+    } else {
+      klee_message("Mock: the module declares no externals to mock");
+    }
+  }
+
   // FIXME: Change me to std types.
   int pArgc;
   char **pArgv;
@@ -1534,8 +1602,6 @@ int main(int argc, char **argv, char **envp) {
     pArgv[i] = pArg;
   }
 
-  Interpreter::InterpreterOptions IOpts;
-  IOpts.MakeConcreteSymbolic = MakeConcreteSymbolic;
   KleeHandler *handler = new KleeHandler(pArgc, pArgv);
   Interpreter *interpreter =
     theInterpreter = Interpreter::create(ctx, IOpts, handler);

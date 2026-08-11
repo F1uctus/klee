@@ -49,6 +49,27 @@ public:
                                const char *suffix) = 0;
 };
 
+/// Which external functions get a synthesised body.
+///
+/// An external call is one KLEE has no bitcode for. By default it is dispatched
+/// to the real function on the host, which is impossible when the module is for
+/// another architecture -- firmware bitcode always is -- and undesirable when
+/// the callee is a hardware register access or a driver entry point. Mocking
+/// replaces the call with a fresh symbolic value of the return type instead.
+enum class MockPolicy {
+  None,   // Do not synthesise anything.
+  Failed, // Only for calls that could not be dispatched, so a mock is the
+          // alternative to terminating the state.
+  All     // For every external, decided up front while building the module.
+};
+
+/// How a mocked call decides what to return.
+enum class MockStrategyKind {
+  Naive,        // A fresh symbolic value per call.
+  Deterministic // The function is an uninterpreted function in the solver, so
+                // equal arguments give equal results.
+};
+
 class Interpreter {
 public:
   /// ModuleOptions - Module level options which can be set when
@@ -84,9 +105,16 @@ public:
     /// symbolic execution on concrete programs.
     unsigned MakeConcreteSymbolic;
 
+    /// Which external functions to answer with a symbolic value instead of
+    /// calling for real.
+    MockPolicy Mock;
+
+    /// What a mocked call returns.
+    MockStrategyKind MockStrategy;
+
     InterpreterOptions()
-      : MakeConcreteSymbolic(false)
-    {}
+        : MakeConcreteSymbolic(false), Mock(MockPolicy::None),
+          MockStrategy(MockStrategyKind::Naive) {}
   };
 
 protected:

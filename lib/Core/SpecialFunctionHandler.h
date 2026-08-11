@@ -97,6 +97,7 @@ namespace klee {
     HANDLER(handleGetObjSize);
     HANDLER(handleGetValue);
     HANDLER(handleIsSymbolic);
+    HANDLER(handleMakeMock);
     HANDLER(handleMakeSymbolic);
     HANDLER(handleMalloc);
     HANDLER(handleMemalign);

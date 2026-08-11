@@ -109,6 +109,7 @@ static constexpr std::array handlerInfo = {
   add("__error", handleErrnoLocation, true),
 #endif
   add("klee_is_symbolic", handleIsSymbolic, true),
+  add("klee_make_mock", handleMakeMock, false),
   add("klee_make_symbolic", handleMakeSymbolic, false),
   add("klee_mark_global", handleMarkGlobal, false),
   add("klee_open_merge", handleOpenMerge, false),
@@ -772,6 +773,76 @@ void SpecialFunctionHandler::handleDefineFixedObject(ExecutionState &state,
   MemoryObject *mo = executor.memory->allocateFixed(address, size, state.prevPC->inst);
   executor.bindObjectInState(state, mo, false);
   mo->isUserSpecified = true; // XXX hack;
+}
+
+void SpecialFunctionHandler::handleMakeMock(ExecutionState &state,
+                                            KInstruction *target,
+                                            std::vector<ref<Expr>> &arguments) {
+  if (arguments.size() != 3) {
+    executor.terminateStateOnUserError(
+        state, "Incorrect number of arguments to "
+               "klee_make_mock(void*, size_t, char*)");
+    return;
+  }
+
+  std::string name =
+      arguments[2]->isZero() ? "" : readStringAtAddress(state, arguments[2]);
+  if (name.empty()) {
+    executor.terminateStateOnUserError(state,
+                                       "Empty name given to klee_make_mock");
+    return;
+  }
+
+  if (executor.interpreterOpts.MockStrategy ==
+      MockStrategyKind::Deterministic) {
+    // Deterministic mocking means the mocked function is an uninterpreted
+    // function in the solver, so that equal arguments give equal results. That
+    // needs the solver layer to carry the call's arguments into the query,
+    // which this expression representation has no way to express -- an array is
+    // identified by a name and a size, not by a term. Refuse rather than
+    // silently degrade to Naive, which would quietly explore paths that the
+    // real function could never produce.
+    executor.terminateStateOnUserError(
+        state, "--mock-strategy=deterministic is not supported by this build; "
+               "use --mock-strategy=naive");
+    return;
+  }
+
+  Executor::ExactResolutionList rl;
+  executor.resolveExact(state, arguments[0], rl, "make_mock");
+
+  for (auto &it : rl) {
+    const MemoryObject *mo = it.first.first;
+    mo->setName(name);
+
+    const ObjectState *old = it.first.second;
+    ExecutionState *s = it.second;
+
+    if (old->readOnly) {
+      executor.terminateStateOnUserError(*s,
+                                         "cannot make readonly object symbolic");
+      return;
+    }
+
+    bool res;
+    bool success __attribute__((unused)) = executor.solver->mustBeTrue(
+        s->constraints,
+        EqExpr::create(
+            ZExtExpr::create(arguments[1], Context::get().getPointerWidth()),
+            mo->getSizeExpr()),
+        res, s->queryMetaData);
+    assert(success && "FIXME: Unhandled solver failure");
+
+    if (res) {
+      // Naive: every call gets its own array, so two calls to the same mocked
+      // function are unrelated. executeMakeSymbolic already versions the name,
+      // which is what keeps them distinct.
+      executor.executeMakeSymbolic(*s, mo, name);
+    } else {
+      executor.terminateStateOnUserError(*s,
+                                         "Wrong size given to klee_make_mock");
+    }
+  }
 }
 
 void SpecialFunctionHandler::handleMakeSymbolic(ExecutionState &state,
