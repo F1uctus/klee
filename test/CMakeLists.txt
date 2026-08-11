@@ -68,13 +68,15 @@ if (DOWNLOAD_LLVM_TESTING_TOOLS)
   set(DOWNLOAD_NOT_SOURCE TRUE)
 endif()
 
-if (NOT EXISTS "${LLVM_TOOLS_BINARY_DIR}/FileCheck")
-  message(WARNING "\"${LLVM_TOOLS_BINARY_DIR}/FileCheck\" does not exist. Downloading sources.")
+# CMAKE_EXECUTABLE_SUFFIX is empty on Unix and ".exe" on Windows; without it the
+# tools are never recognised on Windows and get rebuilt on every configure.
+if (NOT EXISTS "${LLVM_TOOLS_BINARY_DIR}/FileCheck${CMAKE_EXECUTABLE_SUFFIX}")
+  message(WARNING "\"${LLVM_TOOLS_BINARY_DIR}/FileCheck${CMAKE_EXECUTABLE_SUFFIX}\" does not exist. Downloading sources.")
   set(DOWNLOAD_FILECHECK_SOURCE TRUE)
 endif()
 
-if (NOT EXISTS "${LLVM_TOOLS_BINARY_DIR}/not")
-  message(WARNING "\"${LLVM_TOOLS_BINARY_DIR}/not\" does not exist. Downloading sources.")
+if (NOT EXISTS "${LLVM_TOOLS_BINARY_DIR}/not${CMAKE_EXECUTABLE_SUFFIX}")
+  message(WARNING "\"${LLVM_TOOLS_BINARY_DIR}/not${CMAKE_EXECUTABLE_SUFFIX}\" does not exist. Downloading sources.")
   set(DOWNLOAD_NOT_SOURCE TRUE)
 endif()
 
@@ -97,7 +99,9 @@ if (DOWNLOAD_FILECHECK_SOURCE)
   add_executable(FileCheck
     ${FILECHECK_SRC_FILE}
   )
-  llvm_config(FileCheck "${USE_LLVM_SHARED}" support)
+  # The matching logic lives in its own LLVMFileCheck library as of LLVM 12; the
+  # downloaded driver is only a front end for it.
+  llvm_config(FileCheck "${USE_LLVM_SHARED}" filecheck support)
   target_include_directories(FileCheck PRIVATE ${LLVM_INCLUDE_DIRS})
   target_link_libraries(FileCheck PRIVATE ${FILECHECK_NEEDED_LIBS})
 endif()
@@ -132,8 +136,15 @@ add_subdirectory(Concrete)
 # Configure lit test suite
 ###############################################################################
 
-# Find path to libkleeRuntest target for `lit.site.cfg`.
-set(LIB_KLEE_RUN_TEST_PATH $<TARGET_FILE:kleeRuntest>)
+# Find path to libkleeRuntest target for `lit.site.cfg`. The library is only
+# useful for replaying a test case against a natively built program, so platforms
+# that do not build it simply have no path to record; the tests that need it are
+# gated on the "libkleeruntest" feature in lit.cfg.
+if (TARGET kleeRuntest)
+  set(LIB_KLEE_RUN_TEST_PATH $<TARGET_FILE:kleeRuntest>)
+else()
+  set(LIB_KLEE_RUN_TEST_PATH "")
+endif()
 
 configure_file(lit.site.cfg.in
   ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.imd
@@ -146,9 +157,18 @@ file(GENERATE
   INPUT  ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.imd
 )
 
+# Only depend on the tools this platform actually builds; klee-replay,
+# ktest-randgen and kleeRuntest are POSIX-only.
+set(SYSTEMTESTS_DEPENDS klee kleaver klee-exec-tree ktest-gen)
+foreach (_optional_tool klee-replay kleeRuntest ktest-randgen)
+  if (TARGET ${_optional_tool})
+    list(APPEND SYSTEMTESTS_DEPENDS ${_optional_tool})
+  endif()
+endforeach()
+
 add_custom_target(systemtests
   COMMAND "${LIT_TOOL}" ${LIT_ARGS} "${CMAKE_CURRENT_BINARY_DIR}"
-  DEPENDS klee kleaver klee-exec-tree klee-replay kleeRuntest ktest-gen ktest-randgen
+  DEPENDS ${SYSTEMTESTS_DEPENDS}
   COMMENT "Running system tests"
   USES_TERMINAL
 )
