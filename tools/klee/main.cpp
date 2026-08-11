@@ -470,7 +470,8 @@ KleeHandler::KleeHandler(int argc, char **argv)
         SmallString<128> klee_last(directory);
         llvm::sys::path::append(klee_last, "klee-last");
 
-        if ((klee::removeFile(klee_last.c_str()) < 0) && (errno != ENOENT)) {
+        if ((klee::removeDirectorySymlink(klee_last.c_str()) < 0) &&
+            (errno != ENOENT)) {
           klee_warning("cannot remove existing klee-last symlink: %s",
                        strerror(errno));
         }
