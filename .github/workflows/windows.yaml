@@ -74,18 +74,46 @@ jobs:
           }
           Write-Host "Exported $count environment variables"
 
-      - name: Cache the LLVM release
-        id: llvm-cache
+      - name: Exclude the build directories from Defender
+        run: |
+          # The LLVM release unpacks to ~3.9 GB across 4741 files, most of them
+          # small headers, and every one is scanned as it is written. Left on,
+          # real-time protection dominates the whole job: the unpack alone takes
+          # longer than the compile. The runner is disposable and the inputs are
+          # signed releases fetched over TLS, so there is nothing here for it to
+          # protect.
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          New-Item -ItemType Directory -Path $deps -Force | Out-Null
+          foreach ($path in @($deps, $env:GITHUB_WORKSPACE, $env:TEMP)) {
+            try {
+              Add-MpPreference -ExclusionPath $path -ErrorAction Stop
+              Write-Host "Excluded $path"
+            } catch {
+              # Not fatal: it only costs time, and the job is still correct.
+              Write-Host "::warning::Could not exclude ${path}: $($_.Exception.Message)"
+            }
+          }
+
+      - name: Cache the unpacked LLVM
+        id: llvm-unpacked-cache
         uses: actions/cache@v4
         with:
-          # Only the tarball is cached, not the unpacked tree. Unpacked it is
-          # several GB, which would consume most of the repository's 10 GB
-          # cache allowance for a saving smaller than the unpack itself.
+          # Caching the unpacked tree rather than the tarball: restoring it is a
+          # parallel zstd decompression, where unpacking the release is a
+          # single-threaded xz stream followed by 4741 individual file writes.
+          path: ${{ github.workspace }}\..\deps\llvm
+          key: llvm-unpacked-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc-v1
+
+      - name: Cache the LLVM tarball
+        id: llvm-cache
+        if: steps.llvm-unpacked-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
           path: ${{ github.workspace }}\..\deps\llvm.tar.xz
           key: llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc
 
       - name: Download the LLVM release
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        if: steps.llvm-unpacked-cache.outputs.cache-hit != 'true' && steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
           $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
           New-Item -ItemType Directory -Path $deps -Force | Out-Null
@@ -97,16 +125,25 @@ jobs:
             --output (Join-Path $deps 'llvm.tar.xz') $url
 
       - name: Unpack LLVM
+        if: steps.llvm-unpacked-cache.outputs.cache-hit != 'true'
         run: |
           $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
           $root = Join-Path $deps 'llvm'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
+          $started = Get-Date
           # bsdtar ships with Windows and handles .tar.xz natively.
           tar.exe -x -f (Join-Path $deps 'llvm.tar.xz') -C $root --strip-components=1
           if ($LASTEXITCODE -ne 0) { throw "unpacking LLVM failed ($LASTEXITCODE)" }
+          Write-Host ("Unpacked in {0:N1} minutes" -f `
+            ((Get-Date) - $started).TotalMinutes)
+
+      - name: Locate LLVM
+        run: |
+          $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
+          $root = Join-Path $deps 'llvm'
           $config = Join-Path $root 'lib\cmake\llvm\LLVMConfig.cmake'
           if (-not (Test-Path -LiteralPath $config)) {
-            throw "The LLVM release did not contain $config"
+            throw "The LLVM tree at $root does not contain $config"
           }
           "LLVM_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "LLVM at $root"
