@@ -126,16 +126,60 @@ jobs:
 
       - name: Unpack LLVM
         if: steps.llvm-unpacked-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 30
         run: |
           $deps = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'deps'
           $root = Join-Path $deps 'llvm'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          # Report whether the exclusions actually took: Add-MpPreference needs
+          # an elevated session and tamper protection can reject it, in which
+          # case the earlier step warns but the scanning cost remains and this
+          # is the only way to tell.
+          try {
+            $pref = Get-MpPreference
+            Write-Host "Defender exclusions: $($pref.ExclusionPath -join '; ')"
+            Write-Host "Real-time monitoring disabled: $((Get-MpComputerStatus).RealTimeProtectionEnabled -eq $false)"
+          } catch {
+            Write-Host "Defender status unavailable: $($_.Exception.Message)"
+          }
+
+          # bsdtar decompresses and writes in one pass and is very slow here.
+          # 7-Zip, which the runner image ships, is markedly faster: splitting
+          # the work means the xz stream is decoded into one sequential write
+          # and only then expanded into the individual files.
+          $sevenZip = Get-Command 7z.exe -ErrorAction SilentlyContinue
           $started = Get-Date
-          # bsdtar ships with Windows and handles .tar.xz natively.
-          tar.exe -x -f (Join-Path $deps 'llvm.tar.xz') -C $root --strip-components=1
-          if ($LASTEXITCODE -ne 0) { throw "unpacking LLVM failed ($LASTEXITCODE)" }
+          if ($sevenZip) {
+            $tar = Join-Path $deps 'llvm.tar'
+            & $sevenZip.Path x (Join-Path $deps 'llvm.tar.xz') "-o$deps" -y -bso0 -bsp0
+            if ($LASTEXITCODE -ne 0) { throw "7z xz stage failed ($LASTEXITCODE)" }
+            Write-Host ("  xz -> tar in {0:N1} min" -f ((Get-Date) - $started).TotalMinutes)
+
+            $stage2 = Get-Date
+            & $sevenZip.Path x $tar "-o$root" -y -bso0 -bsp0
+            if ($LASTEXITCODE -ne 0) { throw "7z tar stage failed ($LASTEXITCODE)" }
+            Write-Host ("  tar -> files in {0:N1} min" -f ((Get-Date) - $stage2).TotalMinutes)
+            Remove-Item -LiteralPath $tar -Force
+
+            # 7z keeps the archive's single top-level directory, which tar's
+            # --strip-components=1 would have removed. Flatten it so the layout
+            # matches either way.
+            $inner = Get-ChildItem -LiteralPath $root -Directory |
+                     Where-Object { $_.Name -like 'clang+llvm-*' }
+            if ($inner) {
+              Get-ChildItem -LiteralPath $inner.FullName -Force |
+                Move-Item -Destination $root
+              Remove-Item -LiteralPath $inner.FullName -Recurse -Force
+            }
+          } else {
+            tar.exe -x -f (Join-Path $deps 'llvm.tar.xz') -C $root --strip-components=1
+            if ($LASTEXITCODE -ne 0) { throw "unpacking LLVM failed ($LASTEXITCODE)" }
+          }
           Write-Host ("Unpacked in {0:N1} minutes" -f `
             ((Get-Date) - $started).TotalMinutes)
+          Write-Host ("Files: {0}" -f `
+            @(Get-ChildItem -LiteralPath $root -Recurse -File).Count)
 
       - name: Locate LLVM
         run: |
