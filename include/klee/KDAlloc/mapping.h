@@ -39,6 +39,7 @@
 #endif
 
 #include "klee/Support/ErrorHandling.h"
+#include "klee/Support/PlatformCompat.h"
 
 namespace klee::kdalloc {
 /// Sentinel for "this object does not hold a mapping". On POSIX this is mmap's
@@ -58,27 +59,13 @@ class Mapping {
   bool try_map(std::uintptr_t baseAddress) noexcept {
     assert(this->baseAddress == KDALLOC_MAPPING_INVALID);
 
-    // Reserve and commit in one call. Windows commits lazily -- pages are
-    // backed only when first touched -- which is the behaviour MAP_NORESERVE
-    // gives us on Linux, and is what makes the multi-GiB default arena sizes
-    // affordable.
-    //
-    // When a fixed base address is requested, VirtualAlloc fails outright if
-    // the range is already occupied rather than relocating, so there is no need
-    // for the "did we get what we asked for" unmap dance the POSIX path does.
-    // We still check, because a caller passing 0 gets to keep whatever it got.
-    void *mappedAddress =
-        ::VirtualAlloc(reinterpret_cast<LPVOID>(baseAddress), size,
-                       MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // Reserve address space only and let pages be committed as they are first
+    // touched. Committing up front would charge the whole arena against RAM
+    // plus pagefile and fail with ERROR_COMMITMENT_LIMIT long before KLEE's
+    // default sizes are reached, whereas the POSIX path pays nothing for
+    // untouched pages thanks to MAP_NORESERVE.
+    void *mappedAddress = klee::reserveLazyCommit(baseAddress, size);
     if (mappedAddress == nullptr) {
-      this->baseAddress = KDALLOC_MAPPING_INVALID;
-      return false;
-    }
-    if (baseAddress != 0 &&
-        baseAddress != reinterpret_cast<std::uintptr_t>(mappedAddress)) {
-      [[maybe_unused]] BOOL rc =
-          ::VirtualFree(mappedAddress, 0, MEM_RELEASE);
-      assert(rc && "VirtualFree failed");
       this->baseAddress = KDALLOC_MAPPING_INVALID;
       return false;
     }
@@ -181,15 +168,12 @@ public:
     assert(*this && "Invalid mapping");
 
 #if defined(_WIN32)
-    // Decommitting releases the physical backing while keeping the reservation,
-    // so the arena stays at the address KDAlloc handed out. This is the
-    // equivalent of Linux's MADV_DONTNEED and, like it, avoids the teardown and
-    // re-reserve the generic POSIX path needs.
-    [[maybe_unused]] BOOL rc = ::VirtualFree(baseAddress, size, MEM_DECOMMIT);
-    assert(rc && "VirtualFree(MEM_DECOMMIT) failed");
-    [[maybe_unused]] LPVOID recommitted =
-        ::VirtualAlloc(baseAddress, size, MEM_COMMIT, PAGE_READWRITE);
-    assert(recommitted == baseAddress && "could not recommit the mapping");
+    // Dropping the physical backing keeps the reservation, so the arena stays
+    // at the address KDAlloc handed out and the pages simply fault back in on
+    // next use. This is the equivalent of Linux's MADV_DONTNEED, and like it
+    // avoids the teardown and re-reserve the generic POSIX path needs.
+    [[maybe_unused]] bool ok = klee::decommitLazy(baseAddress, size);
+    assert(ok && "could not decommit the mapping");
 #elif defined(__linux__)
     [[maybe_unused]] int rc = ::madvise(baseAddress, size, MADV_DONTNEED);
     assert(rc == 0 && "madvise failed");
@@ -210,9 +194,8 @@ public:
   ~Mapping() {
     if (*this) {
 #if defined(_WIN32)
-      // MEM_RELEASE frees the whole reservation and requires a size of 0.
-      [[maybe_unused]] BOOL rc = ::VirtualFree(baseAddress, 0, MEM_RELEASE);
-      assert(rc && "VirtualFree(MEM_RELEASE) failed");
+      [[maybe_unused]] bool ok = klee::releaseLazyCommit(baseAddress, size);
+      assert(ok && "could not release the mapping");
 #else
       [[maybe_unused]] int rc = ::munmap(baseAddress, size);
       assert(rc == 0 && "munmap failed");

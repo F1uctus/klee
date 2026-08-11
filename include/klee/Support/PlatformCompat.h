@@ -159,6 +159,27 @@ inline int makeDirectory(const char *path, unsigned mode) {
 /// Mode or elevation, so callers must treat failure as non-fatal.
 int createDirectorySymlink(const char *target, const char *linkPath);
 
+#if defined(_WIN32)
+/// Reserves \p size bytes of address space, optionally at \p preferredAddress
+/// (0 means anywhere), and arranges for pages to be committed the first time
+/// they are touched. Returns the base address, or nullptr on failure.
+///
+/// This is the Windows counterpart of mmap(MAP_NORESERVE). Committing up front
+/// is not an option: commit is charged against RAM plus pagefile, so reserving
+/// KLEE's default multi-hundred-GiB allocator arenas that way fails with
+/// ERROR_COMMITMENT_LIMIT. Reserving address space alone is nearly free, and
+/// 64bit processes have address space to spare.
+void *reserveLazyCommit(std::uintptr_t preferredAddress, std::size_t size);
+
+/// Drops the physical backing of a lazy reservation while keeping the address
+/// range reserved, so the pages fault back in on next use. The equivalent of
+/// madvise(MADV_DONTNEED).
+bool decommitLazy(void *base, std::size_t size);
+
+/// Releases a reservation obtained from reserveLazyCommit().
+bool releaseLazyCommit(void *base, std::size_t size);
+#endif
+
 /// Returns the address of the calling thread's errno.
 inline int *getErrnoLocation() {
 #if defined(_WIN32)

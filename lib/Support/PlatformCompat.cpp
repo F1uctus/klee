@@ -9,6 +9,9 @@
 
 #include "klee/Support/PlatformCompat.h"
 
+#include <atomic>
+#include <mutex>
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -64,6 +67,136 @@ bool getProcessUserTime(std::uint64_t &microseconds) {
   return true;
 #endif
 }
+
+#if defined(_WIN32)
+namespace {
+
+/// Reservations eligible for demand-commit.
+///
+/// The table is a fixed-size array of atomics rather than a container behind a
+/// lock because it is read from a vectored exception handler. That runs in
+/// exception context on an arbitrary thread, so it must not allocate and must
+/// not be able to block on a lock some other thread is holding. KLEE creates
+/// four arenas, so a handful of slots is plenty.
+struct LazyRegion {
+  std::atomic<std::uintptr_t> base;
+  std::atomic<std::size_t> size;
+};
+
+constexpr std::size_t maxLazyRegions = 16;
+LazyRegion lazyRegions[maxLazyRegions];
+
+std::atomic<bool> lazyHandlerInstalled{false};
+std::once_flag lazyHandlerOnce;
+
+/// Commit in blocks rather than single pages: a sequential write over a fresh
+/// arena would otherwise take one fault per 4 KiB. 64 KiB matches the Windows
+/// allocation granularity.
+constexpr std::size_t lazyCommitBlock = 64 * 1024;
+
+LONG CALLBACK lazyCommitHandler(EXCEPTION_POINTERS *info) {
+  const EXCEPTION_RECORD *record = info->ExceptionRecord;
+  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
+      record->NumberParameters < 2)
+    return EXCEPTION_CONTINUE_SEARCH;
+
+  const auto fault =
+      static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+
+  for (auto &region : lazyRegions) {
+    const auto base = region.base.load(std::memory_order_acquire);
+    if (base == 0)
+      continue;
+    const auto size = region.size.load(std::memory_order_acquire);
+    if (fault < base || fault - base >= size)
+      continue;
+
+    // Round down to a block boundary and clamp to the end of the region.
+    const auto offset = ((fault - base) / lazyCommitBlock) * lazyCommitBlock;
+    const std::size_t length =
+        (size - offset) < lazyCommitBlock ? (size - offset) : lazyCommitBlock;
+
+    // Committing an already-committed page succeeds, so a race between two
+    // threads faulting on the same block is harmless.
+    if (::VirtualAlloc(reinterpret_cast<LPVOID>(base + offset), length,
+                       MEM_COMMIT, PAGE_READWRITE))
+      return EXCEPTION_CONTINUE_EXECUTION;
+
+    // Out of commit for real: let the normal crash path report it rather than
+    // spinning on the same fault forever.
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
+bool registerLazyRegion(std::uintptr_t base, std::size_t size) {
+  std::call_once(lazyHandlerOnce, [] {
+    // First in the chain, so it sees the fault before anything else.
+    lazyHandlerInstalled.store(
+        ::AddVectoredExceptionHandler(1, lazyCommitHandler) != nullptr,
+        std::memory_order_release);
+  });
+
+  if (!lazyHandlerInstalled.load(std::memory_order_acquire))
+    return false;
+
+  for (auto &region : lazyRegions) {
+    std::uintptr_t expected = 0;
+    if (region.base.compare_exchange_strong(expected, base,
+                                            std::memory_order_acq_rel)) {
+      region.size.store(size, std::memory_order_release);
+      return true;
+    }
+  }
+  return false;
+}
+
+void unregisterLazyRegion(std::uintptr_t base) {
+  for (auto &region : lazyRegions) {
+    if (region.base.load(std::memory_order_acquire) == base) {
+      region.size.store(0, std::memory_order_release);
+      region.base.store(0, std::memory_order_release);
+      return;
+    }
+  }
+}
+
+} // namespace
+
+void *reserveLazyCommit(std::uintptr_t preferredAddress, std::size_t size) {
+  void *base = ::VirtualAlloc(reinterpret_cast<LPVOID>(preferredAddress), size,
+                              MEM_RESERVE, PAGE_READWRITE);
+  if (!base)
+    return nullptr;
+
+  // A fixed address request either lands exactly or fails; VirtualAlloc does
+  // not silently relocate. Check anyway so the caller's contract holds.
+  if (preferredAddress != 0 &&
+      reinterpret_cast<std::uintptr_t>(base) != preferredAddress) {
+    ::VirtualFree(base, 0, MEM_RELEASE);
+    return nullptr;
+  }
+
+  if (!registerLazyRegion(reinterpret_cast<std::uintptr_t>(base), size)) {
+    ::VirtualFree(base, 0, MEM_RELEASE);
+    return nullptr;
+  }
+
+  return base;
+}
+
+bool decommitLazy(void *base, std::size_t size) {
+  // The reservation stays; the pages fault back in through the handler.
+  return ::VirtualFree(base, size, MEM_DECOMMIT) != 0;
+}
+
+bool releaseLazyCommit(void *base, std::size_t size) {
+  (void)size; // MEM_RELEASE frees the whole reservation and requires size 0.
+  unregisterLazyRegion(reinterpret_cast<std::uintptr_t>(base));
+  return ::VirtualFree(base, 0, MEM_RELEASE) != 0;
+}
+#endif
 
 int createDirectorySymlink(const char *target, const char *linkPath) {
 #if defined(_WIN32)
