@@ -57,6 +57,12 @@ static void push_random_obj(KTest *b, const char *name, unsigned non_zero_bytes,
   KTestObject *o = &b->objects[b->numObjects++];
   assert(b->numObjects < MAX);
 
+  // Cleared rather than left uninitialised: version 4 of the format carries an
+  // address and pointer list that a hand-built test case does not have.
+  o->address = 0;
+  o->numPointers = 0;
+  o->pointers = NULL;
+
   if ((o->name = strdup(name)) == NULL) {
     error_exit("%s:%d: strdup() failure\n", __FILE__, __LINE__);
   }
@@ -78,6 +84,12 @@ static void push_obj(KTest *b, const char *name, unsigned total_bytes,
                      unsigned char *content) {
   KTestObject *o = &b->objects[b->numObjects++];
   assert(b->numObjects < MAX);
+
+  // Cleared rather than left uninitialised: version 4 of the format carries an
+  // address and pointer list that a hand-built test case does not have.
+  o->address = 0;
+  o->numPointers = 0;
+  o->pointers = NULL;
 
   if ((o->name = strdup(name)) == NULL) {
     error_exit("%s:%d: strdup() failure\n", __FILE__, __LINE__);

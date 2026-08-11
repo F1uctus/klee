@@ -67,9 +67,13 @@ int main(int argc, char *argv[]) {
   KTest b;
   b.symArgvs = 0;
   b.symArgvLen = 0;
+  // Version 4 of the format carries object addresses and pointer information.
+  // This tool builds test cases by hand and has neither, so the fields have to
+  // be cleared rather than left as whatever was on the stack.
+  b.uninitCoeff = 0;
 
   b.numObjects = 0;
-  b.objects = (KTestObject *)malloc(MAX * sizeof *b.objects);
+  b.objects = (KTestObject *)calloc(MAX, sizeof *b.objects);
 
   if ((argv_copy = (char **)malloc(sizeof(char *) * argc * 2)) == NULL) {
     fprintf(stderr, "Could not allocate more memory\n");
