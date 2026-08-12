@@ -98,8 +98,15 @@ if ($bcaFiles.Count -eq 0) {
 # The architectures actually present, derived from the file names rather than
 # from the CMake cache, so MANIFEST.txt describes what is shipped rather than
 # what was requested.
+#
+# The architecture is glued straight onto the library name with no separator --
+# libkleeRuntimeKLEELibc64_Release.bca, libkleeRuntimeFortifyarm32_Release.bca --
+# so it has to be matched by its own spelling. arm32 is tried before 32 because
+# it ends with it.
 $architectures = $bcaFiles |
-    ForEach-Object { if ($_.BaseName -match '_([^_]+)_Release$') { $Matches[1] } } |
+    ForEach-Object {
+        if ($_.BaseName -match '(arm32|64|32)_Release$') { $Matches[1] }
+    } |
     Sort-Object -Unique
 foreach ($required in @('64', 'arm32')) {
     if ($architectures -notcontains $required) {
