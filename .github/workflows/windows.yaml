@@ -472,7 +472,12 @@ jobs:
         continue-on-error: true
         timeout-minutes: 60
         run: |
-          cmake --build build --target systemtests 2>&1 | Tee-Object -Variable output
+          # lit is invoked directly rather than through the systemtests target:
+          # that target is declared USES_TERMINAL, so ninja hands the child the
+          # console directly and nothing reaches this pipeline -- the summary
+          # came back empty and the gate read it as zero tests passed.
+          & $env:LIT_TOOL -v -s "-j$env:LIT_WORKERS" --timeout=120 `
+            --max-time=2400 build\test 2>&1 | Tee-Object -Variable output
           $summary = $output | Select-String '^\s*(Passed|Failed|Unsupported|Expectedly Failed|Timed Out|Unresolved)\s*:\s*(\d+)'
           $results = @{}
           foreach ($m in $summary) {
