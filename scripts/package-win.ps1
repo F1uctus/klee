@@ -153,9 +153,17 @@ if ($llvmMajor -eq 0) {
     throw "Could not determine the LLVM version from $llvmDir; MANIFEST.txt would be wrong."
 }
 
+# libz3.dll carries no version resource, so the DLL cannot be asked directly.
+# The release directory it came from is named for the version, which is the
+# next most trustworthy source.
 $z3Version = 'unknown'
 $z3FileVersion = (Get-Item -LiteralPath $Z3Dll).VersionInfo.FileVersion
-if ($z3FileVersion) { $z3Version = $z3FileVersion.Trim() }
+if ($z3FileVersion) {
+    $z3Version = $z3FileVersion.Trim()
+} else {
+    $z3Dir = Split-Path -Leaf (Split-Path -Parent (Split-Path -Parent $Z3Dll))
+    if ($z3Dir -match 'z3-([0-9]+(?:\.[0-9]+)*)') { $z3Version = $Matches[1] }
+}
 
 Push-Location $SourceDir
 try {
