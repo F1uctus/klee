@@ -25,6 +25,11 @@ env:
   # lit's default of one worker per core is far too aggressive for KLEE, which
   # is memory-hungry: on a 4-core/16 GB runner the tail of the suite starts
   # failing on commit exhaustion rather than on anything real. See #5.
+  #
+  # lit also has no per-test timeout by default, so one test that never returns
+  # takes the whole job with it -- which is exactly what happened, the run
+  # sitting in the suite until the 180 minute job limit. --timeout bounds each
+  # test and --max-time the suite, so a hang is reported as a timed-out test.
   LIT_WORKERS: 2
 
 defaults:
@@ -315,7 +320,7 @@ jobs:
             -DENABLE_SYSTEM_TESTS=ON `
             -DKLEE_RUNTIME_BUILD_TYPE=Release `
             -DLIT_TOOL="$env:LIT_TOOL" `
-            -DLIT_ARGS="-v;-s;-j$env:LIT_WORKERS"
+            -DLIT_ARGS="-v;-s;-j$env:LIT_WORKERS;--timeout=120;--max-time=2400"
           if ($LASTEXITCODE -ne 0) { throw "configure failed ($LASTEXITCODE)" }
 
       - name: Build
@@ -465,6 +470,7 @@ jobs:
       - name: Run the lit suite
         id: lit
         continue-on-error: true
+        timeout-minutes: 60
         run: |
           cmake --build build --target systemtests 2>&1 | Tee-Object -Variable output
           $summary = $output | Select-String '^\s*(Passed|Failed|Unsupported|Expectedly Failed|Timed Out|Unresolved)\s*:\s*(\d+)'
