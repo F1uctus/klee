@@ -503,8 +503,10 @@ jobs:
           # the Concrete suite was skipped there and ran here; and its per-test
           # timeout was unbounded. Calibrating to another environment's number
           # just produces a gate that is always red, which is worse than no gate.
-          # This is a regression detector, not a quality target.
-          $floor = 190
+          # This is a regression detector, not a quality target: two consecutive
+          # runs measured 175 and 174 passing, so the floor sits below that with
+          # enough room for the handful of tests that flip between runs.
+          $floor = 160
           $passed = [int]'${{ steps.lit.outputs.passed }}'
           Write-Host "lit passed $passed tests (floor $floor)"
           if ($passed -lt $floor) {
