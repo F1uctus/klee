@@ -5,15 +5,10 @@ name: Windows
 # toolchain or the result. It links a prebuilt LLVM release rather than building
 # one, which is what keeps a full run inside a normal Actions budget.
 
+# Started by hand only. A full run sits close to the job limit, so letting every
+# commit queue one burned the Actions budget on iterations that were not worth a
+# Windows runner. Start it with: gh workflow run windows.yaml --ref <branch>
 on:
-  push:
-    branches:
-      - win-native
-      - 'ci/**'
-  pull_request:
-    branches:
-      - win-native
-      - master
   workflow_dispatch:
 
 env:
