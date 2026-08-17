@@ -456,15 +456,23 @@ set_property(CACHE
 message(STATUS "KLEE_RUNTIME_BUILD_TYPE: ${KLEE_RUNTIME_BUILD_TYPE}")
 
 # Check availability of 32bit support for platform
-include(CheckCSourceRuns)
-cmake_push_check_state()
-set(CMAKE_REQUIRED_FLAGS "-m32")
-check_c_source_runs("int main(int argc, char** argv){return 0;}" CHECK_M32_SUPPORT)
-cmake_pop_check_state()
-if (NOT CHECK_M32_SUPPORT)
+if (WIN32)
+  # -m32 is not how a 32bit target is selected under the MSVC ABI, and the probe
+  # below links a native executable, which cannot work when the host toolchain
+  # only ships 64bit libraries. Cross-architecture runtimes are requested
+  # explicitly through KLEE_RUNTIME_EXTRA_ARCHITECTURES instead.
   set(M32_SUPPORTED 0)
 else()
-  set(M32_SUPPORTED 1)
+  include(CheckCSourceRuns)
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_FLAGS "-m32")
+  check_c_source_runs("int main(int argc, char** argv){return 0;}" CHECK_M32_SUPPORT)
+  cmake_pop_check_state()
+  if (NOT CHECK_M32_SUPPORT)
+    set(M32_SUPPORTED 0)
+  else()
+    set(M32_SUPPORTED 1)
+  endif()
 endif()
 
 message(STATUS "32bit platform supported: ${M32_SUPPORTED}")
