@@ -269,6 +269,47 @@ private:
   ref<Expr> makeSymbolicArgument(ExecutionState &state, llvm::Function *f,
                                  unsigned index, const llvm::Argument &arg);
 
+  /// Allocates an object of \p pointee's size, makes it symbolic under \p name,
+  /// and gives the pointers inside it somewhere to point, \p depth levels deep.
+  ///
+  /// This is what lets a function be called with a linked structure it did not
+  /// build. Without it a pointer read out of a symbolic object is an arbitrary
+  /// integer, and following it is a memory error rather than a path -- so the
+  /// code past the first field dereference is not explored at all, and what is
+  /// reported instead is a fault the caller could not have caused.
+  ///
+  /// Each such pointer is left symbolic and constrained to be null or the new
+  /// object's address, so the branch that tests it still forks both ways.
+  const MemoryObject *makeSymbolicPointee(ExecutionState &state,
+                                          const llvm::DIType *pointee,
+                                          const std::string &name,
+                                          llvm::Instruction *allocSite,
+                                          unsigned depth);
+
+  /// Walks the members of \p type laid out at \p base within \p mo, giving each
+  /// pointer among them an object to point at. Recurses through members that
+  /// are themselves aggregates, which share the object rather than getting one.
+  void initialiseMemberPointers(ExecutionState &state, const MemoryObject *mo,
+                                const llvm::DIType *type, std::uint64_t base,
+                                const std::string &name,
+                                llvm::Instruction *allocSite, unsigned depth);
+
+  /// Gives an unresolvable symbolic address something to point at and retries
+  /// the access. Returns false if it declined, leaving \p state untouched.
+  ///
+  /// This is the other half of lazy initialisation, and the half that does not
+  /// need to know a type: whatever made the pointer symbolic -- an entry
+  /// argument, a klee_make_symbolic over a whole structure, a read from another
+  /// lazily built object -- the first dereference arrives here having resolved
+  /// to nothing. Reporting that as a fault blames the callee for a pointer the
+  /// caller invented.
+  ///
+  /// A null address is not lazily initialised: that dereference is a real
+  /// fault, and the state forks so it is still reported.
+  bool lazyInitialiseAddress(ExecutionState &state, bool isWrite,
+                             ref<Expr> address, ref<Expr> value,
+                             KInstruction *target, unsigned bytes);
+
   ObjectState *bindObjectInState(ExecutionState &state, const MemoryObject *mo,
                                  bool isLocal, const Array *array = 0);
 
@@ -595,12 +636,22 @@ public:
 
   bool getSymbolicSolution(
       const ExecutionState &state,
-      std::vector<std::pair<std::string, std::vector<unsigned char>>> &res)
-      override;
+      std::vector<std::pair<std::string, std::vector<unsigned char>>> &res,
+      std::vector<ObjectLayout> *layout = nullptr) override;
 
   void getCoveredLines(const ExecutionState &state,
                        std::map<const std::string *, std::set<unsigned>> &res)
       override;
+
+private:
+  /// Fills \p layout for the solution \p values, keeping only the links the
+  /// solution actually took.
+  void describeSolutionLayout(
+      const ExecutionState &state,
+      const std::vector<std::vector<unsigned char>> &values,
+      std::vector<ObjectLayout> &layout);
+
+public:
 
   Expr::Width getWidthForLLVMType(llvm::Type *type) const;
   size_t getAllocationAlignment(const llvm::Value *allocSite) const;

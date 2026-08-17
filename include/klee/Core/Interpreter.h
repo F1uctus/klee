@@ -195,11 +195,31 @@ public:
                                 std::string &res,
                                 LogType logFormat = STP) = 0;
 
+  /// Where one object of a symbolic solution lived, and which of its bytes hold
+  /// the address of another object of the same solution.
+  ///
+  /// A consumer cannot tell a pointer from an integer holding the same bits, so
+  /// without this it cannot rebuild a linked structure from a test case. Only
+  /// the pointers the run actually gave somewhere to point are listed, and only
+  /// where the solution really put that address -- a pointer the solver chose
+  /// to make null is not one.
+  struct ObjectLayout {
+    std::uint64_t address = 0;
+    struct PointerAt {
+      std::uint64_t offset;      ///< where in this object the pointer sits
+      unsigned index;            ///< which object of the solution it addresses
+      std::uint64_t indexOffset; ///< how far into that object it points
+    };
+    std::vector<PointerAt> pointers;
+  };
+
+  /// \param layout if given, filled in parallel with \p res.
   virtual bool getSymbolicSolution(const ExecutionState &state,
                                    std::vector<
                                    std::pair<std::string,
                                    std::vector<unsigned char> > >
-                                   &res) = 0;
+                                   &res,
+                                   std::vector<ObjectLayout> *layout = nullptr) = 0;
 
   virtual void getCoveredLines(const ExecutionState &state,
                                std::map<const std::string*, std::set<unsigned> > &res) = 0;

@@ -54,6 +54,18 @@ struct MockedCall {
   std::vector<ref<Expr>> result;
 };
 
+/// A pointer inside one symbolic object that was given an object to point at.
+///
+/// The pointer is left symbolic and constrained to be either null or that
+/// object's address, so the branch on it still forks. Which of the two the run
+/// settled on is only known once the test case is solved for, so this records
+/// the possibility and the test case reports only the ones that came true.
+struct LazyPointer {
+  ref<const MemoryObject> from;
+  std::uint64_t offset;
+  ref<const MemoryObject> to;
+};
+
 struct StackFrame {
   KInstIterator caller;
   KFunction *kf;
@@ -261,6 +273,10 @@ public:
 
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled = false;
+
+  /// @brief Pointers inside symbolic objects that were given somewhere to
+  /// point, in the order the objects were built.
+  std::vector<LazyPointer> lazyPointers;
 
   /// @brief Calls to mocked externals already answered on this path, by the
   /// name of the function that was mocked.

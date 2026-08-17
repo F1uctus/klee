@@ -63,12 +63,14 @@ class KTest:
             # Version 4 records where the object lived and which of its bytes
             # are pointers into other objects, so that a linked structure can be
             # reconstructed rather than guessed at from the raw bits.
+            address = 0
+            pointers = []
             if version >= 4:
-                struct.unpack('>Q', f.read(8))          # address
+                address, = struct.unpack('>Q', f.read(8))
                 numPointers, = struct.unpack('>i', f.read(4))
                 for _ in range(numPointers):
-                    struct.unpack('>QQQ', f.read(24))   # offset, index, indexOffset
-            objects.append((name, bytes))
+                    pointers.append(struct.unpack('>QQQ', f.read(24)))
+            objects.append((name, bytes, address, pointers))
 
         if version >= 4:
             struct.unpack('>i', f.read(4))              # uninitCoeff
@@ -103,9 +105,11 @@ class KTest:
         fmt['data'] = "object {0:" + width + "d}: data: {1}"
         fmt['hex' ] = "object {0:" + width + "d}: hex : 0x{1}"
         fmt['text'] = "object {0:" + width + "d}: text: {1}"
+        fmt['addr'] = "object {0:" + width + "d}: addr: 0x{1:x}"
+        fmt['ptr' ] = "object {0:" + width + "d}: ptr : {1}"
 
         # print objects
-        for i, (name, data) in enumerate(self.objects):
+        for i, (name, data, address, pointers) in enumerate(self.objects):
             def p(key, arg): print(fmt[key].format(i, arg), file=sio)
 
             blob = data.rstrip(b'\x00') if format_spec.endswith('trimzeros') else data
@@ -122,12 +126,16 @@ class KTest:
                     p('uint', struct.unpack(m.upper(), data)[0])
                     break
             p('text', txt)
+            if address:
+                p('addr', address)
+            for offset, index, indexOffset in pointers:
+                p('ptr', 'at +%d: object %d + %d' % (offset, index, indexOffset))
 
         return sio.getvalue()
 
     def extract(self, object_names, trim_zeros):
         extracted_objects = set()
-        for name, data in self.objects:
+        for name, data, _, _ in self.objects:
             if name not in object_names:
                 continue
 

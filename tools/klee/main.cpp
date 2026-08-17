@@ -409,7 +409,7 @@ public:
   bool writeTestCaseKTest(
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
           &out,
-      unsigned id);
+      const std::vector<Interpreter::ObjectLayout> &layout, unsigned id);
   void writeTestCaseXML(
       bool isError,
       const std::vector<std::pair<std::string, std::vector<unsigned char>>>
@@ -564,7 +564,7 @@ KleeHandler::openTestFile(const std::string &suffix, unsigned id) {
 
 bool KleeHandler::writeTestCaseKTest(
     const std::vector<std::pair<std::string, std::vector<unsigned char>>> &out,
-    unsigned id) {
+    const std::vector<Interpreter::ObjectLayout> &layout, unsigned id) {
   KTest b;
   b.numArgs = m_argc;
   b.args = m_argv;
@@ -573,21 +573,26 @@ bool KleeHandler::writeTestCaseKTest(
   b.numObjects = out.size();
   b.objects = new KTestObject[b.numObjects];
   assert(b.objects);
-  // Version 4 of the format can describe where an object lived and which of its
-  // bytes are pointers into other objects. This interpreter initialises only
-  // the first level of a symbolic pointer, so there is never a graph of objects
-  // to describe; the fields are written empty rather than guessed at.
   b.uninitCoeff = 0;
   for (unsigned i = 0; i < b.numObjects; i++) {
     KTestObject *o = &b.objects[i];
     o->name = const_cast<char *>(out[i].first.c_str());
-    o->address = 0;
     o->numBytes = out[i].second.size();
     o->bytes = new unsigned char[o->numBytes];
     assert(o->bytes);
     std::copy(out[i].second.begin(), out[i].second.end(), o->bytes);
-    o->numPointers = 0;
-    o->pointers = nullptr;
+
+    // Version 4 of the format says where an object lived and which of its bytes
+    // hold the address of another object, which is what lets a consumer rebuild
+    // a linked structure rather than reading a pointer as an integer.
+    o->address = i < layout.size() ? layout[i].address : 0;
+    o->numPointers = i < layout.size() ? layout[i].pointers.size() : 0;
+    o->pointers = o->numPointers ? new Pointer[o->numPointers] : nullptr;
+    for (unsigned p = 0; p < o->numPointers; p++) {
+      o->pointers[p].offset = layout[i].pointers[p].offset;
+      o->pointers[p].index = layout[i].pointers[p].index;
+      o->pointers[p].indexOffset = layout[i].pointers[p].indexOffset;
+    }
   }
   bool status = true;
   if (!kTest_toFile(&b,
@@ -595,8 +600,10 @@ bool KleeHandler::writeTestCaseKTest(
     status = false;
     klee_warning("unable to write output test case, losing it");
   }
-  for (unsigned i = 0; i < b.numObjects; i++)
+  for (unsigned i = 0; i < b.numObjects; i++) {
     delete[] b.objects[i].bytes;
+    delete[] b.objects[i].pointers;
+  }
   delete[] b.objects;
   return status;
 }
@@ -668,7 +675,9 @@ void KleeHandler::processTestCase(const ExecutionState &state,
   unsigned test_id = ++m_numTotalTests;
   if (!WriteNone) {
     std::vector<std::pair<std::string, std::vector<unsigned char>>> assignments;
-    bool success = m_interpreter->getSymbolicSolution(state, assignments);
+    std::vector<Interpreter::ObjectLayout> layout;
+    bool success = m_interpreter->getSymbolicSolution(state, assignments,
+                                                      &layout);
 
     if (!success)
       klee_warning("unable to get symbolic solution, losing test case");
@@ -678,7 +687,7 @@ void KleeHandler::processTestCase(const ExecutionState &state,
 
     if (success) {
       if (WriteKTests) {
-        if (writeTestCaseKTest(assignments, test_id)) {
+        if (writeTestCaseKTest(assignments, layout, test_id)) {
           atLeastOneGenerated = true;
         }
       }

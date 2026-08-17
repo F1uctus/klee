@@ -162,6 +162,31 @@ cl::opt<std::uint64_t> SymbolicPointeeSize(
              "(default=64)"),
     cl::init(64), cl::cat(TestGenCat));
 
+cl::opt<unsigned> LazyInitDepth(
+    "lazy-init-depth",
+    cl::desc("How many levels of pointers inside a symbolic argument are given "
+             "objects to point at. Each one may still be null, so the branches "
+             "that check for it are explored either way. 0 turns lazy "
+             "initialisation off entirely, which makes following a symbolic "
+             "pointer a memory error (default=2)"),
+    cl::init(2), cl::cat(TestGenCat));
+
+cl::opt<bool> LazyInitOnDeref(
+    "lazy-init-on-deref",
+    cl::desc("Give an object to a pointer that was read out of symbolic memory "
+             "and resolved to nothing, instead of reporting the dereference as "
+             "a fault. This is for generating tests, where such a pointer is an "
+             "input nothing has supplied yet; when looking for faults it hides "
+             "one, so it is off unless asked for (default=false)"),
+    cl::init(false), cl::cat(TestGenCat));
+
+cl::opt<unsigned> LazyInitMaxObjects(
+    "lazy-init-max-objects",
+    cl::desc("How many objects one path may have invented for pointers that "
+             "resolved to nothing. A loop walking a list would otherwise ask "
+             "for one every time round (default=16)"),
+    cl::init(16), cl::cat(TestGenCat));
+
 /* Constraint solving options */
 
 cl::opt<unsigned> MaxSymArraySize(
@@ -4644,6 +4669,15 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   // we are on an error path (no resolution, multiple resolution, one
   // resolution with out of bounds), or we do a single object resolution
 
+  // Before asking which objects this address could be pointing at. A pointer
+  // read out of symbolic memory and never given a value can be made to equal
+  // the address of anything already allocated, so resolution answers with every
+  // unrelated object in the run -- a stack slot, a global, the return value --
+  // and each becomes a path, and a test case saying the structure pointed at
+  // one of them. None of those is what the caller would have passed.
+  if (lazyInitialiseAddress(state, isWrite, address, value, target, bytes))
+    return;
+
   address = optimizer.optimizeExpr(address, true);
   ResolutionList rl;
   bool incomplete = false;
@@ -4726,7 +4760,135 @@ void Executor::executeMemoryOperation(ExecutionState &state,
   }
 }
 
-void Executor::executeMakeSymbolic(ExecutionState &state, 
+namespace {
+
+/// Splits \p address into a value read out of memory and a constant added to
+/// it, which is the shape of every field access through a pointer: the pointer
+/// was loaded, then the field's offset was added.
+void splitPointerAndOffset(ref<Expr> address, ref<Expr> &pointer,
+                           std::uint64_t &offset) {
+  offset = 0;
+  while (const auto *add = dyn_cast<AddExpr>(address)) {
+    if (const auto *left = dyn_cast<klee::ConstantExpr>(add->left)) {
+      offset += left->getZExtValue();
+      address = add->right;
+    } else if (const auto *right = dyn_cast<klee::ConstantExpr>(add->right)) {
+      offset += right->getZExtValue();
+      address = add->left;
+    } else {
+      break;
+    }
+  }
+  pointer = address;
+}
+
+/// Collects the reads \p e is made of, in the order the bytes were read, or
+/// returns false if it is anything but a concatenation of reads.
+bool collectReads(ref<Expr> e, std::vector<const ReadExpr *> &reads) {
+  if (const auto *read = dyn_cast<ReadExpr>(e)) {
+    reads.push_back(read);
+    return true;
+  }
+  if (const auto *concat = dyn_cast<ConcatExpr>(e))
+    return collectReads(concat->getLeft(), reads) &&
+           collectReads(concat->getRight(), reads);
+  return false;
+}
+
+} // namespace
+
+bool Executor::lazyInitialiseAddress(ExecutionState &state, bool isWrite,
+                                     ref<Expr> address, ref<Expr> value,
+                                     KInstruction *target, unsigned bytes) {
+  if (!LazyInitOnDeref || isa<ConstantExpr>(address))
+    return false;
+  // A chain has to end somewhere: a loop walking a list would otherwise ask for
+  // an object every time round, and the run would never finish exploring one
+  // path.
+  if (state.lazyPointers.size() >= LazyInitMaxObjects)
+    return false;
+
+  ref<Expr> pointer;
+  std::uint64_t offset = 0;
+  splitPointerAndOffset(address, pointer, offset);
+
+  // Where the pointer was read from. This is not only for the test case: it is
+  // what tells a pointer the caller supplied from an address the program
+  // computed. Walking off the end of an array is the program's mistake and has
+  // to stay reported as one; a pointer read out of symbolic memory was never
+  // given a value by anything, and is the case this exists for.
+  const MemoryObject *from = nullptr;
+  std::uint64_t fromOffset = 0;
+  std::vector<const ReadExpr *> reads;
+  if (collectReads(pointer, reads) &&
+      reads.size() == Context::get().getPointerWidth() / 8) {
+    const Array *array = reads.front()->updates.root;
+    std::uint64_t least = UINT64_MAX;
+    bool contiguous = array != nullptr;
+    for (const ReadExpr *read : reads) {
+      const auto *index = dyn_cast<ConstantExpr>(read->index);
+      if (!index || read->updates.root != array) {
+        contiguous = false;
+        break;
+      }
+      least = std::min(least, index->getZExtValue());
+    }
+    if (contiguous) {
+      for (const auto &symbolic : state.symbolics) {
+        if (symbolic.second == array) {
+          from = symbolic.first.get();
+          fromOffset = least;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!from)
+    return false;
+
+  // Null is not somewhere an object can be put. Splitting the state here keeps
+  // the fault visible on the branch where the pointer really is null, which is
+  // the one case where blaming the dereference is right.
+  StatePair split =
+      fork(state, Expr::createIsZero(pointer), true, BranchType::MemOp);
+  if (split.first)
+    terminateStateOnProgramError(*split.first, "memory error: null page access",
+                                 StateTerminationType::Ptr,
+                                 getAddressInfo(*split.first, address));
+  if (!split.second)
+    return true;
+  ExecutionState *lazy = split.second;
+
+  // Nothing here says how big the thing pointed at is -- an opaque pointer has
+  // no pointee type and the access only says how many bytes it wants. Erring
+  // large costs a few unread bytes in the test case; erring small turns the
+  // next field access into the error this exists to avoid.
+  std::uint64_t size = std::max<std::uint64_t>(SymbolicPointeeSize,
+                                               offset + bytes);
+  MemoryObject *mo = memory->allocate(size, /*isLocal=*/false,
+                                      /*isGlobal=*/false, lazy,
+                                      target ? target->inst : nullptr,
+                                      /*alignment=*/8);
+  if (!mo) {
+    // The state has already been split, so there is no going back to the
+    // caller's error path -- this branch has to end here.
+    terminateStateOnExecError(
+        *lazy, "out of memory while initialising a symbolic pointer");
+    return true;
+  }
+  // The name a consumer knows to expect for an object the run invented rather
+  // than the program named.
+  mo->setName("unnamed");
+  executeMakeSymbolic(*lazy, mo, "unnamed");
+  addConstraint(*lazy, EqExpr::create(pointer, mo->getBaseExpr()));
+  lazy->lazyPointers.push_back(LazyPointer{from, fromOffset, mo});
+
+  executeMemoryOperation(*lazy, isWrite, address, value, target);
+  return true;
+}
+
+void Executor::executeMakeSymbolic(ExecutionState &state,
                                    const MemoryObject *mo,
                                    const std::string &name) {
   // Create a new object state for the memory object (instead of a copy).
@@ -4854,38 +5016,140 @@ std::string parameterNameFromDebugInfo(llvm::Function *f, unsigned index) {
   return "";
 }
 
-/// The size in bytes of what parameter \p index of \p f points at, or 0 if the
-/// module carries no debug information saying.
+/// What parameter \p index of \p f points at, or null if the module carries no
+/// debug information saying, or says it points at something with no size.
 ///
 /// Opaque pointers mean the IR itself no longer records a pointee type, so for
-/// anything other than a scalar this is the only place the size survives. The
-/// module must have been compiled with -g.
-uint64_t pointeeSizeFromDebugInfo(llvm::Function *f, unsigned index) {
+/// anything other than a scalar this is the only place it survives -- both the
+/// size to allocate and the members to look through. The module must have been
+/// compiled with -g.
+const llvm::DIType *pointeeTypeFromDebugInfo(llvm::Function *f, unsigned index) {
   llvm::DISubprogram *sp = f->getSubprogram();
   if (!sp)
-    return 0;
+    return nullptr;
   llvm::DISubroutineType *fnType = sp->getType();
   if (!fnType)
-    return 0;
+    return nullptr;
   llvm::DITypeRefArray types = fnType->getTypeArray();
   // Element 0 is the return type, so parameter i is at i + 1.
   if (types.size() <= index + 1)
-    return 0;
+    return nullptr;
 
   const llvm::DIType *paramType = stripTypeSugar(types[index + 1]);
   const auto *ptr = dyn_cast_or_null<llvm::DIDerivedType>(paramType);
   if (!ptr || ptr->getTag() != llvm::dwarf::DW_TAG_pointer_type)
-    return 0;
+    return nullptr;
 
-  const llvm::DIType *pointee = stripTypeSugar(ptr->getBaseType());
-  if (!pointee)
-    return 0;
   // A void* has no base type and an incomplete struct has no size; neither
   // tells us how much to allocate.
-  return (pointee->getSizeInBits() + 7) / 8;
+  const llvm::DIType *pointee = stripTypeSugar(ptr->getBaseType());
+  return (pointee && pointee->getSizeInBits() != 0) ? pointee : nullptr;
 }
 
 } // namespace
+
+namespace {
+
+/// The size in bytes of \p type, or 0 if it has none -- an incomplete struct,
+/// or the void a `void *` points at.
+uint64_t sizeOfDIType(const llvm::DIType *type) {
+  return type ? (type->getSizeInBits() + 7) / 8 : 0;
+}
+
+/// What \p type points at, if it is a pointer to something with a size.
+const llvm::DIType *pointeeOf(const llvm::DIType *type) {
+  const auto *ptr = dyn_cast_or_null<llvm::DIDerivedType>(type);
+  if (!ptr || ptr->getTag() != llvm::dwarf::DW_TAG_pointer_type)
+    return nullptr;
+  const llvm::DIType *pointee = stripTypeSugar(ptr->getBaseType());
+  return sizeOfDIType(pointee) == 0 ? nullptr : pointee;
+}
+
+} // namespace
+
+const MemoryObject *Executor::makeSymbolicPointee(ExecutionState &state,
+                                                  const llvm::DIType *pointee,
+                                                  const std::string &name,
+                                                  Instruction *allocSite,
+                                                  unsigned depth) {
+  uint64_t size = sizeOfDIType(pointee);
+  if (size == 0)
+    size = SymbolicPointeeSize;
+
+  MemoryObject *mo =
+      memory->allocate(size, /*isLocal=*/false, /*isGlobal=*/false, &state,
+                       allocSite, /*alignment=*/8);
+  if (!mo)
+    return nullptr;
+  mo->setName(name);
+  executeMakeSymbolic(state, mo, name);
+
+  if (depth > 0)
+    initialiseMemberPointers(state, mo, pointee, /*base=*/0, name, allocSite,
+                             depth);
+  return mo;
+}
+
+void Executor::initialiseMemberPointers(ExecutionState &state,
+                                        const MemoryObject *mo,
+                                        const llvm::DIType *type,
+                                        std::uint64_t base,
+                                        const std::string &name,
+                                        Instruction *allocSite,
+                                        unsigned depth) {
+  const auto *composite = dyn_cast_or_null<llvm::DICompositeType>(type);
+  if (!composite)
+    return;
+  // An array's elements are described by subranges rather than members, and a
+  // pointer per element is not what an argument of one is asking for.
+  if (composite->getTag() == llvm::dwarf::DW_TAG_array_type)
+    return;
+
+  const Expr::Width pointerWidth = Context::get().getPointerWidth();
+  const std::uint64_t pointerBytes = pointerWidth / 8;
+
+  for (llvm::DINode *element : composite->getElements()) {
+    const auto *member = dyn_cast_or_null<llvm::DIDerivedType>(element);
+    if (!member || member->getTag() != llvm::dwarf::DW_TAG_member)
+      continue;
+    // A bit field's offset is not a whole number of bytes, and nothing that
+    // could hold a pointer is ever declared as one.
+    if (member->getOffsetInBits() % 8 != 0)
+      continue;
+    const std::uint64_t offset = base + member->getOffsetInBits() / 8;
+    const llvm::DIType *memberType = stripTypeSugar(member->getBaseType());
+
+    if (const llvm::DIType *target = pointeeOf(memberType)) {
+      if (offset + pointerBytes > mo->size)
+        continue;
+      const MemoryObject *to = makeSymbolicPointee(
+          state, target, name + "." + member->getName().str(), allocSite,
+          depth - 1);
+      if (!to)
+        continue;
+
+      const ObjectState *os = state.addressSpace.findObject(mo);
+      assert(os && "the object was just made symbolic");
+      ref<Expr> field = os->read(offset, pointerWidth);
+      // Null or that object, and nothing else. Leaving it free would put the
+      // dereference back where it started; pinning it to the object would make
+      // the null branch unreachable, and a function that checks its arguments
+      // for null would never be seen doing it.
+      addConstraint(state, OrExpr::create(Expr::createIsZero(field),
+                                          EqExpr::create(field,
+                                                         to->getBaseExpr())));
+      state.lazyPointers.push_back(LazyPointer{mo, offset, to});
+      continue;
+    }
+
+    // An aggregate member is laid out inside this object, so it has no address
+    // of its own; its own members are reached at an offset from here.
+    if (isa_and_nonnull<llvm::DICompositeType>(memberType))
+      initialiseMemberPointers(state, mo, memberType, offset,
+                               name + "." + member->getName().str(), allocSite,
+                               depth);
+  }
+}
 
 ref<Expr> Executor::makeSymbolicArgument(ExecutionState &state, Function *f,
                                          unsigned index,
@@ -4916,29 +5180,24 @@ ref<Expr> Executor::makeSymbolicArgument(ExecutionState &state, Function *f,
   }
 
   // A pointer parameter gets an object of the pointee's size, with symbolic
-  // contents, and the argument becomes that object's address. Only one level is
-  // initialised: a pointer stored *inside* that object is itself symbolic and
-  // will not resolve, which KLEE reports as a memory error rather than
-  // following silently.
-  uint64_t size = pointeeSizeFromDebugInfo(f, index);
-  if (size == 0) {
-    size = SymbolicPointeeSize;
+  // contents, and the argument becomes that object's address. The pointers
+  // inside that object are given objects of their own, --lazy-init-depth levels
+  // down, so a function handed a linked structure it did not build can be
+  // followed past its first field dereference.
+  const llvm::DIType *pointee = pointeeTypeFromDebugInfo(f, index);
+  if (!pointee)
     klee_warning_once(
         &arg,
         "No debug information for the type '%s' points at; allocating %" PRIu64
-        " bytes. Compile with -g, or set --symbolic-pointee-size.",
-        name.c_str(), size);
-  }
+        " bytes and looking no further. Compile with -g, or set "
+        "--symbolic-pointee-size.",
+        name.c_str(), SymbolicPointeeSize.getValue());
 
-  MemoryObject *mo =
-      memory->allocate(size, /*isLocal=*/false, /*isGlobal=*/false, &state,
-                       allocSite, /*alignment=*/8);
+  const MemoryObject *mo =
+      makeSymbolicPointee(state, pointee, name, allocSite, LazyInitDepth);
   if (!mo)
-    klee_error("Could not allocate %" PRIu64
-               " bytes for symbolic argument '%s'",
-               size, name.c_str());
-  mo->setName(name);
-  executeMakeSymbolic(state, mo, name);
+    klee_error("Could not allocate memory for symbolic argument '%s'",
+               name.c_str());
   return mo->getBaseExpr();
 }
 
@@ -5142,10 +5401,11 @@ void Executor::getConstraintLog(const ExecutionState &state, std::string &res,
 }
 
 bool Executor::getSymbolicSolution(const ExecutionState &state,
-                                   std::vector< 
+                                   std::vector<
                                    std::pair<std::string,
                                    std::vector<unsigned char> > >
-                                   &res) {
+                                   &res,
+                                   std::vector<ObjectLayout> *layout) {
   solver->setTimeout(coreSolverTimeout);
 
   ConstraintSet extendedConstraints(state.constraints);
@@ -5189,7 +5449,47 @@ bool Executor::getSymbolicSolution(const ExecutionState &state,
   
   for (unsigned i = 0; i != state.symbolics.size(); ++i)
     res.push_back(std::make_pair(state.symbolics[i].first->name, values[i]));
+
+  if (layout)
+    describeSolutionLayout(state, values, *layout);
   return true;
+}
+
+void Executor::describeSolutionLayout(
+    const ExecutionState &state,
+    const std::vector<std::vector<unsigned char>> &values,
+    std::vector<ObjectLayout> &layout) {
+  layout.assign(state.symbolics.size(), ObjectLayout{});
+
+  std::map<const MemoryObject *, unsigned> indexOf;
+  for (unsigned i = 0; i != state.symbolics.size(); ++i) {
+    const MemoryObject *mo = state.symbolics[i].first.get();
+    indexOf[mo] = i;
+    layout[i].address = mo->address;
+  }
+
+  const std::uint64_t pointerBytes = Context::get().getPointerWidth() / 8;
+  for (const LazyPointer &lazy : state.lazyPointers) {
+    auto from = indexOf.find(lazy.from.get());
+    auto to = indexOf.find(lazy.to.get());
+    if (from == indexOf.end() || to == indexOf.end())
+      continue;
+
+    const std::vector<unsigned char> &bytes = values[from->second];
+    if (lazy.offset + pointerBytes > bytes.size())
+      continue;
+    // The pointer was constrained to be null or that object, and the solution
+    // has chosen. Reporting an entry for the null case would tell a consumer to
+    // rebuild a link the run did not take.
+    std::uint64_t stored = 0;
+    for (std::uint64_t b = 0; b != pointerBytes; ++b)
+      stored |= static_cast<std::uint64_t>(bytes[lazy.offset + b]) << (8 * b);
+    if (stored != layout[to->second].address)
+      continue;
+
+    layout[from->second].pointers.push_back(
+        ObjectLayout::PointerAt{lazy.offset, to->second, 0});
+  }
 }
 
 void Executor::getCoveredLines(const ExecutionState &state,
