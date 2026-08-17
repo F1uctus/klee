@@ -1349,12 +1349,68 @@ int main(int argc, char **argv, char **envp) {
   parseArguments(argc, argv);
   sys::PrintStackTraceOnErrorSignal(argv[0]);
 
-  if (Watchdog) {
+  if (Watchdog && !SupervisedChild::isSupervisedChild()) {
 #ifdef _WIN32
-    // The watchdog forks and signals its child; there is no faithful Windows
-    // equivalent short of a job object, so refuse rather than silently ignoring
-    // the flag. --max-time is still enforced in-process.
-    klee_error("--watchdog is not supported on Windows");
+    if (MaxTime.empty()) {
+      klee_error("--watchdog used without --max-time");
+    }
+
+    // Same shape as the POSIX watchdog below, built the only way Windows
+    // allows: there is no fork, so this process starts itself again and
+    // watches the copy. The copy is in a job object that kills its contents
+    // when the last handle closes, so the analysis cannot outlive its
+    // supervisor.
+    SupervisedChild child;
+    std::string errorMessage;
+    if (!child.start(errorMessage)) {
+      klee_error("%s", errorMessage.c_str());
+    }
+
+    klee_message("KLEE: WATCHDOG: watching a supervised copy of this process");
+    fflush(stderr);
+
+    const time::Span maxTime(MaxTime);
+    auto nextStep = time::getWallTime() + maxTime + (maxTime / 10);
+    int level = 0;
+
+    while (true) {
+      int exitCode = 0;
+      // Waiting on the handle rather than sleeping and polling: the same
+      // second-long granularity as the POSIX loop, but it returns the moment
+      // the copy exits instead of up to a second later.
+      if (child.wait(1000, exitCode))
+        return exitCode;
+
+      const auto now = time::getWallTime();
+      if (now <= nextStep)
+        continue;
+
+      ++level;
+      if (level == 1) {
+        // The one thing that can still produce test cases. It reaches the
+        // interrupt handler installed below, which halts execution and writes
+        // out what was reached; a job object cannot ask for that, it can only
+        // end things.
+        klee_warning("KLEE: WATCHDOG: time expired, attempting halt via "
+                     "console control event");
+        if (!child.requestHalt()) {
+          klee_warning("KLEE: WATCHDOG: could not ask the copy to halt");
+          level = 1000; // Nothing gentler is left to try.
+        }
+      } else {
+        // No gdb step here: the POSIX ladder uses it to call halt_execution()
+        // from outside when the signal was not enough, and that has no
+        // Windows counterpart worth the machinery. Ending the job also ends
+        // anything the analysis started, which kill(9) on one pid does not.
+        klee_warning("KLEE: WATCHDOG: ending the job (I tried to be nice)");
+        child.terminate();
+        return 1;
+      }
+
+      // A halt may have to write a great many test cases, so give it room.
+      const auto grace = std::max(time::seconds(15), maxTime / 10);
+      nextStep = time::getWallTime() + grace;
+    }
 #else
     if (MaxTime.empty()) {
       klee_error("--watchdog used without --max-time");

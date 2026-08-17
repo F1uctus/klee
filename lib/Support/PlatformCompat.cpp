@@ -308,4 +308,140 @@ bool getMinorPageFaultCount(std::uint64_t &faults) {
 #endif
 }
 
+namespace {
+/// Set in the copy, read by it. An environment variable rather than an added
+/// argument, so that the command line the copy reports is the one the user
+/// typed, and so that nothing has to be parsed back out of it.
+const char *const SupervisedChildMarker = "KLEE_SUPERVISED_CHILD";
+} // namespace
+
+bool SupervisedChild::isSupervisedChild() {
+  const char *marker = std::getenv(SupervisedChildMarker);
+  return marker != nullptr && marker[0] != '\0';
+}
+
+#if defined(_WIN32)
+
+SupervisedChild::~SupervisedChild() {
+  // Closing the job kills what is in it, which is the point: a watchdog that
+  // is itself killed must not leave the analysis running.
+  if (jobHandle)
+    ::CloseHandle(static_cast<HANDLE>(jobHandle));
+  if (processHandle)
+    ::CloseHandle(static_cast<HANDLE>(processHandle));
+}
+
+bool SupervisedChild::start(std::string &errorMessage) {
+  HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
+  if (!job) {
+    errorMessage = "could not create a job object for the watchdog";
+    return false;
+  }
+
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!::SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                 &limits, sizeof(limits))) {
+    ::CloseHandle(job);
+    errorMessage = "could not ask the job object to kill what it contains";
+    return false;
+  }
+
+  if (!::SetEnvironmentVariableA(SupervisedChildMarker, "1")) {
+    ::CloseHandle(job);
+    errorMessage = "could not mark the child process";
+    return false;
+  }
+
+  // GetCommandLineW rather than a rebuild from argv: quoting a command line
+  // back together is a well known way to get it subtly wrong, and this is
+  // exactly the string this process was given.
+  std::wstring commandLine(::GetCommandLineW());
+  commandLine.push_back(L'\0');
+
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION info{};
+
+  // CREATE_NEW_PROCESS_GROUP is what makes a console control event
+  // deliverable to this child alone; without it the event would go to every
+  // process sharing this console, including the watchdog itself.
+  // Handles are inherited so the child keeps this process's stdout and stderr.
+  const BOOL created =
+      ::CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
+                       CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup,
+                       &info);
+
+  // Cleared straight away: the variable did its job at CreateProcess, and
+  // leaving it set would mark anything else this process starts.
+  ::SetEnvironmentVariableA(SupervisedChildMarker, nullptr);
+
+  if (!created) {
+    ::CloseHandle(job);
+    errorMessage = "could not start the supervised copy of this process";
+    return false;
+  }
+
+  if (!::AssignProcessToJobObject(job, info.hProcess)) {
+    ::TerminateProcess(info.hProcess, 1);
+    ::CloseHandle(info.hThread);
+    ::CloseHandle(info.hProcess);
+    ::CloseHandle(job);
+    errorMessage = "could not put the supervised copy in its job object";
+    return false;
+  }
+
+  ::CloseHandle(info.hThread);
+  jobHandle = job;
+  processHandle = info.hProcess;
+  processId = info.dwProcessId;
+  return true;
+}
+
+bool SupervisedChild::wait(unsigned milliseconds, int &exitCode) {
+  if (!processHandle)
+    return false;
+
+  const DWORD status =
+      ::WaitForSingleObject(static_cast<HANDLE>(processHandle), milliseconds);
+  if (status != WAIT_OBJECT_0)
+    return false;
+
+  DWORD code = 0;
+  if (!::GetExitCodeProcess(static_cast<HANDLE>(processHandle), &code))
+    return false;
+
+  exitCode = static_cast<int>(code);
+  return true;
+}
+
+bool SupervisedChild::requestHalt() {
+  if (!processId)
+    return false;
+  // CTRL_BREAK rather than CTRL_C: a process group created by
+  // CREATE_NEW_PROCESS_GROUP starts with CTRL_C disabled, and CTRL_BREAK
+  // cannot be disabled.
+  return ::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, processId) != 0;
+}
+
+void SupervisedChild::terminate() {
+  if (jobHandle)
+    ::TerminateJobObject(static_cast<HANDLE>(jobHandle), 1);
+}
+
+#else
+
+SupervisedChild::~SupervisedChild() = default;
+
+bool SupervisedChild::start(std::string &errorMessage) {
+  errorMessage = "the supervised child is only used on Windows; POSIX forks";
+  return false;
+}
+
+bool SupervisedChild::wait(unsigned, int &) { return false; }
+bool SupervisedChild::requestHalt() { return false; }
+void SupervisedChild::terminate() {}
+
+#endif
+
 } // namespace klee

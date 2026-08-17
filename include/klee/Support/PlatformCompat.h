@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 
 #include <sys/stat.h>
 
@@ -62,6 +63,56 @@ bool getMinorPageFaultCount(std::uint64_t &faults);
 /// a button, so a single assertion in a test case stalls an unattended run for
 /// as long as it is given -- which for a test suite is until it is killed.
 void reportFailuresToStderr();
+
+/// A copy of this process, supervised by it.
+///
+/// The POSIX watchdog forks: the parent watches, the child carries on as KLEE.
+/// Windows has no fork, so the same shape is built the other way round -- the
+/// process starts itself again and marks the copy as the one that does the
+/// work. isSupervisedChild() is how that copy knows.
+///
+/// The copy is put in a job object that is set to kill what it contains when
+/// its last handle closes, so a watchdog that dies -- or is killed, or faults
+/// -- does not leave the analysis running unattended. That is the part a
+/// waitpid loop gets for free from process reparenting and Windows does not.
+class SupervisedChild {
+public:
+  SupervisedChild() = default;
+  ~SupervisedChild();
+
+  SupervisedChild(const SupervisedChild &) = delete;
+  SupervisedChild &operator=(const SupervisedChild &) = delete;
+
+  /// Starts this executable again, with the same command line, marked so that
+  /// the copy runs the analysis instead of watching. False if it could not be
+  /// started, in which case errorMessage says why.
+  bool start(std::string &errorMessage);
+
+  /// Waits up to the given number of milliseconds. Returns true once the copy
+  /// has exited, with its status in exitCode.
+  bool wait(unsigned milliseconds, int &exitCode);
+
+  /// Asks the copy to stop the way a user pressing a key would.
+  ///
+  /// There is no signal to send, so this is a console control event, which the
+  /// copy is able to receive because it was started in a process group of its
+  /// own. It arrives at the interrupt handler KLEE has already installed, and
+  /// so halts execution and writes out the states that were reached -- which
+  /// is the whole point of asking before killing.
+  bool requestHalt();
+
+  /// Kills the copy and everything it started, without waiting.
+  void terminate();
+
+  /// Whether this process is the copy: the one that should run the analysis
+  /// rather than supervise it.
+  static bool isSupervisedChild();
+
+private:
+  void *processHandle = nullptr;
+  void *jobHandle = nullptr;
+  unsigned long processId = 0;
+};
 
 /// Returns the identifier of the calling process.
 inline int getProcessID() {
