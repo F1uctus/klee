@@ -4782,6 +4782,30 @@ void splitPointerAndOffset(ref<Expr> address, ref<Expr> &pointer,
   pointer = address;
 }
 
+/// The size of what \p inst is reaching into through a pointer, or 0 if the
+/// instruction does not say.
+///
+/// An opaque pointer records no pointee type, but a getelementptr still names
+/// the type it indexes, and that is the whole object the access is a part of.
+/// Getting this right is what lets a consumer match the object against the
+/// structure it stands for; the access width alone would describe one field.
+uint64_t pointeeSizeFromAccess(const llvm::Instruction *inst,
+                               const llvm::DataLayout &layout) {
+  const llvm::Value *pointer = nullptr;
+  if (const auto *load = dyn_cast_or_null<llvm::LoadInst>(inst))
+    pointer = load->getPointerOperand();
+  else if (const auto *store = dyn_cast_or_null<llvm::StoreInst>(inst))
+    pointer = store->getPointerOperand();
+  if (!pointer)
+    return 0;
+
+  const auto *gep = dyn_cast<llvm::GetElementPtrInst>(pointer);
+  if (!gep)
+    return 0;
+  llvm::Type *source = gep->getSourceElementType();
+  return source->isSized() ? layout.getTypeAllocSize(source) : 0;
+}
+
 /// Collects the reads \p e is made of, in the order the bytes were read, or
 /// returns false if it is anything but a concatenation of reads.
 bool collectReads(ref<Expr> e, std::vector<const ReadExpr *> &reads) {
@@ -4860,12 +4884,16 @@ bool Executor::lazyInitialiseAddress(ExecutionState &state, bool isWrite,
     return true;
   ExecutionState *lazy = split.second;
 
-  // Nothing here says how big the thing pointed at is -- an opaque pointer has
-  // no pointee type and the access only says how many bytes it wants. Erring
-  // large costs a few unread bytes in the test case; erring small turns the
-  // next field access into the error this exists to avoid.
-  std::uint64_t size = std::max<std::uint64_t>(SymbolicPointeeSize,
-                                               offset + bytes);
+  // How big the thing pointed at is. The instruction says, when the access goes
+  // through a getelementptr; failing that there is nothing to go on but the
+  // width of this one access, and erring large is the safer way to be wrong --
+  // too small turns the next field access into the error this exists to avoid.
+  std::uint64_t size = pointeeSizeFromAccess(
+      lazy->prevPC ? lazy->prevPC->inst : nullptr,
+      kmodule->targetData ? *kmodule->targetData : llvm::DataLayout(""));
+  if (size == 0)
+    size = SymbolicPointeeSize;
+  size = std::max<std::uint64_t>(size, offset + bytes);
   MemoryObject *mo = memory->allocate(size, /*isLocal=*/false,
                                       /*isGlobal=*/false, lazy,
                                       target ? target->inst : nullptr,
