@@ -4006,8 +4006,44 @@ static std::set<std::string> okExternals(okExternalsList,
                                          okExternalsList + 
                                          (sizeof(okExternalsList)/sizeof(okExternalsList[0])));
 
+void Executor::constrainMockDeterministic(ExecutionState &state,
+                                          const std::string &name,
+                                          std::vector<ref<Expr>> arguments,
+                                          std::vector<ref<Expr>> result) {
+  auto &history = state.mockedCalls[name];
+
+  for (const auto &prior : history) {
+    // A call whose shape does not match cannot be compared against. That means
+    // a varargs callee reached with a different number of arguments, or a
+    // return value read back at a different width; either way the honest answer
+    // is to leave this call unconstrained rather than to invent an alignment.
+    if (prior.arguments.size() != arguments.size() ||
+        prior.result.size() != result.size())
+      continue;
+
+    ref<Expr> sameArguments = ConstantExpr::alloc(1, Expr::Bool);
+    for (unsigned i = 0; i != arguments.size(); ++i)
+      sameArguments = AndExpr::create(
+          sameArguments, EqExpr::create(arguments[i], prior.arguments[i]));
+
+    ref<Expr> sameResult = ConstantExpr::alloc(1, Expr::Bool);
+    for (unsigned i = 0; i != result.size(); ++i)
+      sameResult =
+          AndExpr::create(sameResult, EqExpr::create(result[i], prior.result[i]));
+
+    // An implication, not an equality: the calls are tied together only on the
+    // paths where the arguments do agree. Adding it does not fork, so the cost
+    // is one more clause per earlier call rather than another state.
+    addConstraint(state,
+                  OrExpr::create(Expr::createIsZero(sameArguments), sameResult));
+  }
+
+  history.push_back(MockedCall{std::move(arguments), std::move(result)});
+}
+
 bool Executor::mockExternalCall(ExecutionState &state, KInstruction *target,
-                                KCallable *callable, const char *reason) {
+                                KCallable *callable, const char *reason,
+                                const std::vector<ref<Expr>> &arguments) {
   const std::string name = callable->getName().str();
   Type *resultType = target->inst->getType();
 
@@ -4045,7 +4081,15 @@ bool Executor::mockExternalCall(ExecutionState &state, KInstruction *target,
 
   const ObjectState *os = state.addressSpace.findObject(mo);
   assert(os && "the object was just bound");
-  bindLocal(target, state, os->read(0, width));
+  ref<Expr> value = os->read(0, width);
+
+  if (interpreterOpts.MockStrategy == MockStrategyKind::Deterministic)
+    // The arguments are in hand here, so nothing has to be spilled to memory
+    // first -- unlike a mock body synthesised into the module, which has only
+    // klee_make_mock to speak through.
+    constrainMockDeterministic(state, name, arguments, {value});
+
+  bindLocal(target, state, value);
   return true;
 }
 
@@ -4065,7 +4109,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
     // makes this the normal path for firmware rather than an error case, so
     // --mock-policy=failed answers the call instead of killing the state.
     if (interpreterOpts.Mock == MockPolicy::Failed) {
-      mockExternalCall(state, target, callable, "external calls are disallowed");
+      mockExternalCall(state, target, callable, "external calls are disallowed",
+                       arguments);
       return;
     }
     klee_warning("Disallowed call to external function: %s\n",
@@ -4200,7 +4245,8 @@ void Executor::callExternalFunction(ExecutionState &state, KInstruction *target,
   bool success = externalDispatcher->executeCall(callable, target->inst, args);
   if (!success) {
     if (interpreterOpts.Mock == MockPolicy::Failed) {
-      mockExternalCall(state, target, callable, "the external call failed");
+      mockExternalCall(state, target, callable, "the external call failed",
+                       arguments);
       return;
     }
     terminateStateOnExecError(state,

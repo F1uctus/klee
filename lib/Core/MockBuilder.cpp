@@ -11,6 +11,7 @@
 #include "klee/Config/Version.h"
 #include "klee/Support/ErrorHandling.h"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -96,19 +97,66 @@ MockBuilder::externalGlobals() const {
 }
 
 void MockBuilder::callMakeMock(Value *source, Type *type,
-                               const std::string &name) {
-  // klee_make_mock(void *addr, size_t nbytes, const char *name)
+                               const std::string &name, Value *args,
+                               uint64_t argsBytes) {
+  // klee_make_mock(void *addr, size_t nbytes, const char *name,
+  //                void *args, size_t argsBytes)
   auto *voidPtrTy = PointerType::getUnqual(ctx);
   auto *sizeTy = Type::getInt64Ty(ctx);
-  auto *signature =
-      FunctionType::get(Type::getVoidTy(ctx), {voidPtrTy, sizeTy, voidPtrTy},
-                        /*isVarArg=*/false);
+  auto *signature = FunctionType::get(
+      Type::getVoidTy(ctx), {voidPtrTy, sizeTy, voidPtrTy, voidPtrTy, sizeTy},
+      /*isVarArg=*/false);
   auto callee = mockModule->getOrInsertFunction("klee_make_mock", signature);
 
   auto *nameValue = builder->CreateGlobalString(name);
   auto size = mockModule->getDataLayout().getTypeStoreSize(type);
-  builder->CreateCall(
-      callee, {source, ConstantInt::get(sizeTy, size), nameValue});
+  builder->CreateCall(callee, {source, ConstantInt::get(sizeTy, size), nameValue,
+                               args ? args : Constant::getNullValue(voidPtrTy),
+                               ConstantInt::get(sizeTy, argsBytes)});
+}
+
+Value *MockBuilder::spillArguments(Function *func, const std::string &name,
+                                   uint64_t &argsBytes) {
+  argsBytes = 0;
+  if (interpreterOptions.MockStrategy != MockStrategyKind::Deterministic)
+    return nullptr;
+
+  // A varargs callee is the one case where nothing can be said. The unnamed
+  // arguments are the ones that distinguish two calls, and a synthesised body
+  // cannot reach them, so spilling the declared ones would judge calls equal
+  // that differ in everything that mattered. Handing over no buffer at all is
+  // how this tells the handler to leave such calls alone.
+  if (func->isVarArg())
+    return nullptr;
+
+  if (func->arg_empty()) {
+    // Nothing distinguishes two calls, which is what an empty argument list
+    // should mean: a byte of zero compares equal to itself, so every call is
+    // tied to the first. The buffer exists only to say so.
+    auto *slot = builder->CreateAlloca(Type::getInt8Ty(ctx), nullptr,
+                                       name + "_args");
+    builder->CreateStore(ConstantInt::get(Type::getInt8Ty(ctx), 0), slot);
+    argsBytes = 1;
+    return slot;
+  }
+
+  // Packed, so that no padding byte lands between two arguments. The handler
+  // compares the buffer byte by byte and has no layout to consult, so a padding
+  // byte there would be compared as though it carried meaning.
+  SmallVector<Type *, 8> argTypes;
+  for (const auto &arg : func->args())
+    argTypes.push_back(arg.getType());
+  auto *packed = StructType::get(ctx, argTypes, /*isPacked=*/true);
+
+  auto *slot = builder->CreateAlloca(packed, nullptr, name + "_args");
+  unsigned index = 0;
+  for (auto &arg : func->args()) {
+    builder->CreateStore(&arg, builder->CreateStructGEP(packed, slot, index));
+    ++index;
+  }
+
+  argsBytes = mockModule->getDataLayout().getTypeStoreSize(packed);
+  return slot;
 }
 
 void MockBuilder::buildFunctionBodies() {
@@ -144,7 +192,9 @@ void MockBuilder::buildFunctionBodies() {
       continue;
     } else {
       auto *slot = builder->CreateAlloca(returnType, nullptr, name + "_result");
-      callMakeMock(slot, returnType, name);
+      uint64_t argsBytes = 0;
+      auto *args = spillArguments(func, name, argsBytes);
+      callMakeMock(slot, returnType, name, args, argsBytes);
       builder->CreateRet(builder->CreateLoad(returnType, slot));
     }
 

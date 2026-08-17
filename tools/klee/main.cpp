@@ -332,8 +332,9 @@ namespace {
           clEnumValN(MockStrategyKind::Naive, "naive",
                      "A fresh symbolic value for each call (default)"),
           clEnumValN(MockStrategyKind::Deterministic, "deterministic",
-                     "Treat the function as uninterpreted, so equal arguments "
-                     "give equal results. Not supported by this build.")),
+                     "Still a fresh symbolic value per call, but constrained "
+                     "to equal what an earlier call with equal arguments "
+                     "returned, so the function cannot contradict itself")),
       cl::init(MockStrategyKind::Naive), cl::cat(MockCat));
 
   cl::list<std::string> MockModeledFunctions(

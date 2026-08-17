@@ -64,10 +64,16 @@ enum class MockPolicy {
 };
 
 /// How a mocked call decides what to return.
+///
+/// Deterministic compares arguments as they were passed, so two calls given the
+/// same pointer count as equal however the memory behind it has changed. That
+/// is the usual reading of a deterministic mock -- there is no well-defined
+/// depth at which to stop following pointers -- and it is the one to keep in
+/// mind when a mocked callee is expected to observe its arguments' contents.
 enum class MockStrategyKind {
-  Naive,        // A fresh symbolic value per call.
-  Deterministic // The function is an uninterpreted function in the solver, so
-                // equal arguments give equal results.
+  Naive,        // A fresh symbolic value per call, unrelated to any other.
+  Deterministic // Still a fresh symbolic value, but constrained to equal what
+                // an earlier call with equal arguments returned.
 };
 
 class Interpreter {

@@ -258,6 +258,45 @@ SpecialFunctionHandler::readStringAtAddress(ExecutionState &state,
   return buf.str();
 }
 
+bool SpecialFunctionHandler::readBytesAtAddress(ExecutionState &state,
+                                                ref<Expr> addressExpr,
+                                                std::uint64_t bytes,
+                                                std::vector<ref<Expr>> &result) {
+  result.clear();
+  if (bytes == 0)
+    return true;
+
+  ObjectPair op;
+  addressExpr = executor.toUnique(state, addressExpr);
+  if (!isa<ConstantExpr>(addressExpr)) {
+    executor.terminateStateOnUserError(
+        state, "Symbolic buffer pointer passed to one of the klee_ functions");
+    return false;
+  }
+  ref<ConstantExpr> address = cast<ConstantExpr>(addressExpr);
+  if (!state.addressSpace.resolveOne(address, op)) {
+    executor.terminateStateOnUserError(
+        state, "Invalid buffer pointer passed to one of the klee_ functions");
+    return false;
+  }
+
+  const MemoryObject *mo = op.first;
+  const ObjectState *os = op.second;
+  // Concrete, because the address it was derived from is.
+  std::uint64_t offset =
+      cast<ConstantExpr>(mo->getOffsetExpr(address))->getZExtValue();
+  if (offset + bytes > mo->size) {
+    executor.terminateStateOnUserError(
+        state, "Buffer passed to one of the klee_ functions is too small");
+    return false;
+  }
+
+  result.reserve(bytes);
+  for (std::uint64_t i = 0; i != bytes; ++i)
+    result.push_back(os->read8(offset + i));
+  return true;
+}
+
 /****/
 
 void SpecialFunctionHandler::handleAbort(ExecutionState &state,
@@ -778,10 +817,13 @@ void SpecialFunctionHandler::handleDefineFixedObject(ExecutionState &state,
 void SpecialFunctionHandler::handleMakeMock(ExecutionState &state,
                                             KInstruction *target,
                                             std::vector<ref<Expr>> &arguments) {
-  if (arguments.size() != 3) {
+  // The three-argument form is the whole of what a naive mock needs. The
+  // deterministic strategy adds the buffer the call's arguments were spilled
+  // into, since a synthesised body has no other way to hand them over.
+  if (arguments.size() != 3 && arguments.size() != 5) {
     executor.terminateStateOnUserError(
         state, "Incorrect number of arguments to "
-               "klee_make_mock(void*, size_t, char*)");
+               "klee_make_mock(void*, size_t, char*[, void*, size_t])");
     return;
   }
 
@@ -793,19 +835,24 @@ void SpecialFunctionHandler::handleMakeMock(ExecutionState &state,
     return;
   }
 
-  if (executor.interpreterOpts.MockStrategy ==
-      MockStrategyKind::Deterministic) {
-    // Deterministic mocking means the mocked function is an uninterpreted
-    // function in the solver, so that equal arguments give equal results. That
-    // needs the solver layer to carry the call's arguments into the query,
-    // which this expression representation has no way to express -- an array is
-    // identified by a name and a size, not by a term. Refuse rather than
-    // silently degrade to Naive, which would quietly explore paths that the
-    // real function could never produce.
-    executor.terminateStateOnUserError(
-        state, "--mock-strategy=deterministic is not supported by this build; "
-               "use --mock-strategy=naive");
-    return;
+  // A buffer of arguments is what makes two calls comparable. Its absence --
+  // the three-argument form, or a null pointer from a caller that had nothing
+  // it could hand over, such as a varargs mock -- means this call is left
+  // unconstrained, which is the naive behaviour and the only honest one when
+  // there is nothing to compare.
+  const bool comparable = executor.interpreterOpts.MockStrategy ==
+                              MockStrategyKind::Deterministic &&
+                          arguments.size() == 5 && !arguments[3]->isZero();
+
+  std::uint64_t argsBytes = 0;
+  if (comparable) {
+    ref<Expr> sizeExpr = executor.toUnique(state, arguments[4]);
+    if (!isa<ConstantExpr>(sizeExpr)) {
+      executor.terminateStateOnUserError(
+          state, "Symbolic argument-buffer size given to klee_make_mock");
+      return;
+    }
+    argsBytes = cast<ConstantExpr>(sizeExpr)->getZExtValue();
   }
 
   Executor::ExactResolutionList rl;
@@ -833,15 +880,39 @@ void SpecialFunctionHandler::handleMakeMock(ExecutionState &state,
         res, s->queryMetaData);
     assert(success && "FIXME: Unhandled solver failure");
 
-    if (res) {
-      // Naive: every call gets its own array, so two calls to the same mocked
-      // function are unrelated. executeMakeSymbolic already versions the name,
-      // which is what keeps them distinct.
-      executor.executeMakeSymbolic(*s, mo, name);
-    } else {
+    if (!res) {
       executor.terminateStateOnUserError(*s,
                                          "Wrong size given to klee_make_mock");
+      continue;
     }
+
+    // Every call gets its own array either way -- executeMakeSymbolic versions
+    // the name, which is what keeps them distinct, and what keeps each one a
+    // separate object in the test case so replay can feed them back one call at
+    // a time.
+    executor.executeMakeSymbolic(*s, mo, name);
+
+    if (!comparable)
+      // Naive stops here: two calls to the same mocked function are unrelated,
+      // so a function that reads the same input twice may see it change.
+      continue;
+
+    // Deterministic ties them together instead. The arguments have to be read
+    // out of the spill buffer before anything else writes over it, and the
+    // result out of the array that was just bound.
+    std::vector<ref<Expr>> callArguments;
+    if (!readBytesAtAddress(*s, arguments[3], argsBytes, callArguments))
+      continue;
+
+    const ObjectState *fresh = s->addressSpace.findObject(mo);
+    assert(fresh && "the object was just made symbolic");
+    std::vector<ref<Expr>> callResult;
+    callResult.reserve(mo->size);
+    for (unsigned i = 0; i != mo->size; ++i)
+      callResult.push_back(fresh->read8(i));
+
+    executor.constrainMockDeterministic(*s, name, std::move(callArguments),
+                                        std::move(callResult));
   }
 }
 

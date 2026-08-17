@@ -12,6 +12,7 @@
 
 #include "klee/Config/config.h"
 
+#include <cstdint>
 #include <map>
 #include <vector>
 #include <string>
@@ -71,7 +72,15 @@ namespace klee {
     /* Convenience routines */
 
     std::string readStringAtAddress(ExecutionState &state, ref<Expr> address);
-    
+
+    /// Reads \p bytes bytes at \p address as one expression each, leaving them
+    /// symbolic. Unlike the string readers this is for a buffer whose contents
+    /// are the point, not a name to look at. Returns false and terminates the
+    /// state if the address or the extent does not resolve.
+    bool readBytesAtAddress(ExecutionState &state, ref<Expr> address,
+                            std::uint64_t bytes,
+                            std::vector<ref<Expr>> &result);
+
     /* Handlers */
 
 #define HANDLER(name) void name(ExecutionState &state, \

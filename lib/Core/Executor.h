@@ -245,7 +245,23 @@ private:
   /// Answers an external call with a fresh symbolic value of its return type
   /// instead of dispatching it. Returns false if the state was terminated.
   bool mockExternalCall(ExecutionState &state, KInstruction *target,
-                        KCallable *callable, const char *reason);
+                        KCallable *callable, const char *reason,
+                        const std::vector<ref<Expr>> &arguments);
+
+  /// Ties a freshly mocked return value to the calls to \p name this state has
+  /// already answered, and records it among them.
+  ///
+  /// This is what --mock-strategy=deterministic buys over naive: for every
+  /// earlier call, the constraint "these arguments equal those arguments
+  /// implies this result equals that result" is added. The result stays an
+  /// otherwise unconstrained symbolic object, so it is still reported in the
+  /// test case and still replays; it is only forbidden from disagreeing with
+  /// itself. With no arguments to compare, the implication degenerates to
+  /// equality, which is the right reading of a deterministic nullary function.
+  void constrainMockDeterministic(ExecutionState &state,
+                                  const std::string &name,
+                                  std::vector<ref<Expr>> arguments,
+                                  std::vector<ref<Expr>> result);
 
   /// Builds a symbolic value for one entry point parameter, allocating backing
   /// storage in \p state. Pointer parameters get an object of the pointee's

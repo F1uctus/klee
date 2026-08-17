@@ -21,12 +21,11 @@
 // RUN: %ktest-tool %t.failed/test000001.ktest | FileCheck --check-prefix=KTEST %s
 // KTEST: name: 'hardware_read'
 
-// The deterministic strategy needs uninterpreted functions in the solver, which
-// this build does not provide. It must say so rather than silently behave as
-// though it were naive.
+// The deterministic strategy only constrains repeated calls against each other.
+// This function is called once, so it explores exactly what naive explores.
 // RUN: rm -rf %t.det
 // RUN: %klee --output-dir=%t.det --external-calls=none --mock-policy=all --mock-strategy=deterministic %t1.bc 2>&1 | FileCheck --check-prefix=DET %s
-// DET: not supported by this build
+// DET: completed paths = 3
 
 #include "klee/klee.h"
 

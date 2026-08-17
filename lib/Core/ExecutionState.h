@@ -40,6 +40,20 @@ struct InstructionInfo;
 
 llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const MemoryMap &mm);
 
+/// One answered call to a mocked external function.
+///
+/// Both halves are kept in pieces rather than as one wide expression: a return
+/// value, and an argument list spilled to memory, can both be wider than any
+/// single width the solver is asked to reason about. Comparing piecewise
+/// sidesteps that, and the pieces line up positionally because every call to
+/// the same function produces the same shape.
+struct MockedCall {
+  /// What the call was given, in declaration order.
+  std::vector<ref<Expr>> arguments;
+  /// What it was answered with.
+  std::vector<ref<Expr>> result;
+};
+
 struct StackFrame {
   KInstIterator caller;
   KFunction *kf;
@@ -247,6 +261,15 @@ public:
 
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled = false;
+
+  /// @brief Calls to mocked externals already answered on this path, by the
+  /// name of the function that was mocked.
+  ///
+  /// Only --mock-strategy=deterministic fills this in; it is what lets a later
+  /// call be constrained to agree with an earlier one. Held by value rather
+  /// than shared, so a forked state inherits the calls made before the fork and
+  /// neither branch sees what the other answers after it.
+  std::map<std::string, std::vector<MockedCall>> mockedCalls;
 
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;

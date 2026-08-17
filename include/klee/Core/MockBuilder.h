@@ -13,16 +13,19 @@
 
 #include "llvm/IR/IRBuilder.h"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 
 namespace llvm {
+class Function;
 class FunctionType;
 class GlobalVariable;
 class LLVMContext;
 class Module;
+class Value;
 } // namespace llvm
 
 namespace klee {
@@ -61,9 +64,18 @@ private:
   void buildFunctionBodies();
   void buildGlobalInitialiser();
 
-  /// Emits a klee_make_mock(&source, sizeof(type), name) call.
+  /// Emits a klee_make_mock(&source, sizeof(type), name, args, argsBytes)
+  /// call. \p args is the buffer the call's arguments were spilled into, or
+  /// null when there is nothing to compare this call against.
   void callMakeMock(llvm::Value *source, llvm::Type *type,
-                    const std::string &name);
+                    const std::string &name, llvm::Value *args = nullptr,
+                    uint64_t argsBytes = 0);
+
+  /// Copies \p func's declared parameters into one packed buffer and returns
+  /// it, so that the handler can tell two calls apart. Returns null when there
+  /// is nothing to spill.
+  llvm::Value *spillArguments(llvm::Function *func, const std::string &name,
+                              uint64_t &argsBytes);
 
   const llvm::Module *userModule;
   llvm::LLVMContext &ctx;
