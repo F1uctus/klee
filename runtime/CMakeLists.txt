@@ -18,6 +18,9 @@ if (M32_SUPPORTED)
     list(APPEND bc_architectures "32")
 endif ()
 
+# Cross-architecture runtimes requested by the user, e.g. arm32 for Cortex-M.
+list(APPEND bc_architectures ${KLEE_RUNTIME_EXTRA_ARCHITECTURES})
+
 set(LIB_BC_SUFFIX "")
 
 foreach (bc_architecture ${bc_architectures})
@@ -29,6 +32,8 @@ foreach (bc_architecture ${bc_architectures})
         set(local_flags "")
         if (bc_architecture EQUAL "32")
             list(APPEND local_flags -m32)
+        elseif (DEFINED KLEE_RUNTIME_ARCH_FLAGS_${bc_architecture})
+            list(APPEND local_flags ${KLEE_RUNTIME_ARCH_FLAGS_${bc_architecture}})
         endif ()
 
 

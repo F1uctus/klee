@@ -462,6 +462,23 @@ endif()
 
 message(STATUS "32bit platform supported: ${M32_SUPPORTED}")
 
+# Additional target architectures to build the runtime bitcode libraries for.
+# Unlike the host runtimes these are never linked natively, so they only need a
+# clang that can target them -- which makes them the mechanism for analysing
+# firmware bitcode, e.g. Cortex-M. Each entry NAME expects a matching
+# KLEE_RUNTIME_ARCH_FLAGS_NAME holding the flags to compile it with.
+set(KLEE_RUNTIME_EXTRA_ARCHITECTURES "arm32" CACHE STRING
+  "Extra architectures to build the runtime bitcode libraries for")
+
+# ARMv6-M is the least capable Cortex-M profile (M0/M0+), and every Cortex-M
+# variant from M0 through M7 shares one LLVM data layout, so a single arm32
+# runtime covers all of them.
+set(KLEE_RUNTIME_ARCH_FLAGS_arm32
+  "--target=thumbv6m-none-eabi;-mfloat-abi=soft;-ffreestanding;-fno-builtin"
+  CACHE STRING "Flags used to build the arm32 runtime bitcode libraries")
+
+message(STATUS "Extra runtime architectures: ${KLEE_RUNTIME_EXTRA_ARCHITECTURES}")
+
 set(KLEE_INSTALL_RUNTIME_DIR "${CMAKE_INSTALL_FULL_LIBDIR}/klee/runtime")
 
 # Location where KLEE will look for the built runtimes by default.
