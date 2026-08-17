@@ -165,6 +165,22 @@ private:
                          unsigned valueWidth);
 
   Z3SortHandle getBvSort(unsigned width);
+
+  /// The float sort a word of \p width bits encodes, which is only the widths
+  /// IEEE 754 names a format for.
+  Z3SortHandle getFloatSort(unsigned width);
+
+  /// Reads a bit vector as the float it encodes, and back again.
+  ///
+  /// Values cross this boundary rather than living as floats, so that memory,
+  /// arrays and test cases go on holding bytes and know nothing about this.
+  Z3ASTHandle castToFloat(Z3ASTHandle bitVector);
+  Z3ASTHandle castToBitVector(Z3ASTHandle floatValue);
+
+  /// To nearest, ties to even -- the mode a C program is in unless it has
+  /// asked for another, which nothing in the expression layer can say.
+  Z3ASTHandle roundNearestTiesToEven();
+
   Z3SortHandle getArraySort(Z3SortHandle domainSort, Z3SortHandle rangeSort);
   bool autoClearConstructCache;
   std::string z3LogInteractionFile;

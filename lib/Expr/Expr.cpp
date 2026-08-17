@@ -164,6 +164,14 @@ void Expr::printKind(llvm::raw_ostream &os, Kind k) {
     X(Sle);
     X(Sgt);
     X(Sge);
+    X(FOEq);
+    X(FOLt);
+    X(FOLe);
+    X(FUno);
+    X(FAdd);
+    X(FSub);
+    X(FMul);
+    X(FDiv);
 #undef X
   default:
     assert(0 && "invalid kind");
@@ -296,6 +304,15 @@ ref<Expr> Expr::createFromKind(Kind k, std::vector<CreateArg> args) {
       BINARY_EXPR_CASE(Sle);
       BINARY_EXPR_CASE(Sgt);
       BINARY_EXPR_CASE(Sge);
+
+      BINARY_EXPR_CASE(FOEq);
+      BINARY_EXPR_CASE(FOLt);
+      BINARY_EXPR_CASE(FOLe);
+      BINARY_EXPR_CASE(FUno);
+      BINARY_EXPR_CASE(FAdd);
+      BINARY_EXPR_CASE(FSub);
+      BINARY_EXPR_CASE(FMul);
+      BINARY_EXPR_CASE(FDiv);
   }
 }
 
@@ -491,6 +508,94 @@ ref<ConstantExpr> ConstantExpr::Sge(const ref<ConstantExpr> &RHS) {
 }
 
 /***/
+
+const llvm::fltSemantics *klee::fpSemanticsFor(Expr::Width width) {
+  switch (width) {
+  case Expr::Int16:
+    return &llvm::APFloat::IEEEhalf();
+  case Expr::Int32:
+    return &llvm::APFloat::IEEEsingle();
+  case Expr::Int64:
+    return &llvm::APFloat::IEEEdouble();
+  case Expr::Fl80:
+    return &llvm::APFloat::x87DoubleExtended();
+  case 128:
+    return &llvm::APFloat::IEEEquad();
+  default:
+    return nullptr;
+  }
+}
+
+namespace {
+
+/// Reads \p e's bits as the float they encode.
+llvm::APFloat toFloat(const ref<ConstantExpr> &e) {
+  const llvm::fltSemantics *semantics = klee::fpSemanticsFor(e->getWidth());
+  assert(semantics && "not a width a float is encoded in");
+  return llvm::APFloat(*semantics, e->getAPValue());
+}
+
+/// The bits \p f is encoded as, as a value of the width it came from.
+ref<ConstantExpr> fromFloat(const llvm::APFloat &f) {
+  return ConstantExpr::alloc(f.bitcastToAPInt());
+}
+
+/// Arithmetic is to nearest with ties to even. Nothing in the expression layer
+/// can say otherwise, and it is the mode a C program is in unless it has gone
+/// out of its way.
+constexpr llvm::APFloat::roundingMode toNearest =
+    llvm::APFloat::rmNearestTiesToEven;
+
+} // namespace
+
+ref<ConstantExpr> ConstantExpr::FAdd(const ref<ConstantExpr> &RHS) {
+  llvm::APFloat result = toFloat(this);
+  result.add(toFloat(RHS), toNearest);
+  return fromFloat(result);
+}
+
+ref<ConstantExpr> ConstantExpr::FSub(const ref<ConstantExpr> &RHS) {
+  llvm::APFloat result = toFloat(this);
+  result.subtract(toFloat(RHS), toNearest);
+  return fromFloat(result);
+}
+
+ref<ConstantExpr> ConstantExpr::FMul(const ref<ConstantExpr> &RHS) {
+  llvm::APFloat result = toFloat(this);
+  result.multiply(toFloat(RHS), toNearest);
+  return fromFloat(result);
+}
+
+ref<ConstantExpr> ConstantExpr::FDiv(const ref<ConstantExpr> &RHS) {
+  llvm::APFloat result = toFloat(this);
+  result.divide(toFloat(RHS), toNearest);
+  return fromFloat(result);
+}
+
+ref<ConstantExpr> ConstantExpr::FOEq(const ref<ConstantExpr> &RHS) {
+  return ConstantExpr::alloc(
+      toFloat(this).compare(toFloat(RHS)) == llvm::APFloat::cmpEqual,
+      Expr::Bool);
+}
+
+ref<ConstantExpr> ConstantExpr::FOLt(const ref<ConstantExpr> &RHS) {
+  return ConstantExpr::alloc(
+      toFloat(this).compare(toFloat(RHS)) == llvm::APFloat::cmpLessThan,
+      Expr::Bool);
+}
+
+ref<ConstantExpr> ConstantExpr::FOLe(const ref<ConstantExpr> &RHS) {
+  llvm::APFloat::cmpResult order = toFloat(this).compare(toFloat(RHS));
+  return ConstantExpr::alloc(order == llvm::APFloat::cmpLessThan ||
+                                 order == llvm::APFloat::cmpEqual,
+                             Expr::Bool);
+}
+
+ref<ConstantExpr> ConstantExpr::FUno(const ref<ConstantExpr> &RHS) {
+  return ConstantExpr::alloc(
+      toFloat(this).compare(toFloat(RHS)) == llvm::APFloat::cmpUnordered,
+      Expr::Bool);
+}
 
 ref<Expr>  NotOptimizedExpr::create(ref<Expr> src) {
   return NotOptimizedExpr::alloc(src);
@@ -1006,6 +1111,36 @@ BCREATE(SRemExpr, SRem)
 BCREATE(ShlExpr, Shl)
 BCREATE(LShrExpr, LShr)
 BCREATE(AShrExpr, AShr)
+
+/// Floating point deliberately gets no simplification beyond folding two
+/// constants. The identities the integer builders rely on are not identities
+/// here: x + 0.0 is not x when x is -0.0, x - x is not 0 when x is NaN, and
+/// x < x is not simply false for the same reason. Folding two constants is
+/// arithmetic rather than algebra, so it stays.
+///
+/// A width llvm::APFloat has no semantics for cannot be folded at all; the
+/// expression is built and the solver is left to say what it means, which is
+/// the same answer the symbolic case gets.
+#define FCREATE(_e_op, _op)                                                    \
+  ref<Expr> _e_op ::create(const ref<Expr> &l, const ref<Expr> &r) {           \
+    assert(l->getWidth() == r->getWidth() && "type mismatch");                 \
+    if (fpSemanticsFor(l->getWidth()))                                         \
+      if (ConstantExpr *cl = dyn_cast<ConstantExpr>(l))                        \
+        if (ConstantExpr *cr = dyn_cast<ConstantExpr>(r))                      \
+          return cl->_op(cr);                                                  \
+    return _e_op ::alloc(l, r);                                                \
+  }
+
+FCREATE(FAddExpr, FAdd)
+FCREATE(FSubExpr, FSub)
+FCREATE(FMulExpr, FMul)
+FCREATE(FDivExpr, FDiv)
+FCREATE(FOEqExpr, FOEq)
+FCREATE(FOLtExpr, FOLt)
+FCREATE(FOLeExpr, FOLe)
+FCREATE(FUnoExpr, FUno)
+
+#undef FCREATE
 
 #define CMPCREATE(_e_op, _op) \
 ref<Expr>  _e_op ::create(const ref<Expr> &l, const ref<Expr> &r) { \

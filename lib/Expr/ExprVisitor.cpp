@@ -88,6 +88,14 @@ ref<Expr> ExprVisitor::visitActual(const ref<Expr> &e) {
     case Expr::Sle: res = visitSle(static_cast<SleExpr&>(ep)); break;
     case Expr::Sgt: res = visitSgt(static_cast<SgtExpr&>(ep)); break;
     case Expr::Sge: res = visitSge(static_cast<SgeExpr&>(ep)); break;
+    case Expr::FOEq: res = visitFOEq(static_cast<FOEqExpr&>(ep)); break;
+    case Expr::FOLt: res = visitFOLt(static_cast<FOLtExpr&>(ep)); break;
+    case Expr::FOLe: res = visitFOLe(static_cast<FOLeExpr&>(ep)); break;
+    case Expr::FUno: res = visitFUno(static_cast<FUnoExpr&>(ep)); break;
+    case Expr::FAdd: res = visitFAdd(static_cast<FAddExpr&>(ep)); break;
+    case Expr::FSub: res = visitFSub(static_cast<FSubExpr&>(ep)); break;
+    case Expr::FMul: res = visitFMul(static_cast<FMulExpr&>(ep)); break;
+    case Expr::FDiv: res = visitFDiv(static_cast<FDivExpr&>(ep)); break;
     case Expr::Constant:
     default:
       assert(0 && "invalid expression kind");
@@ -255,6 +263,39 @@ ExprVisitor::Action ExprVisitor::visitSgt(const SgtExpr&) {
 }
 
 ExprVisitor::Action ExprVisitor::visitSge(const SgeExpr&) {
-  return Action::doChildren(); 
+  return Action::doChildren();
 }
+
+ExprVisitor::Action ExprVisitor::visitFOEq(const FOEqExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFOLt(const FOLtExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFOLe(const FOLeExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFUno(const FUnoExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFAdd(const FAddExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFSub(const FSubExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFMul(const FMulExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFDiv(const FDivExpr &) {
+  return Action::doChildren();
+}
+
 

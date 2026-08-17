@@ -173,14 +173,39 @@ public:
     Sgt, ///< Not used in canonical form
     Sge, ///< Not used in canonical form
 
-    LastKind=Sge,
+    // Floating point compare.
+    //
+    // A value of floating point type is carried as the bit pattern of its
+    // encoding, exactly as it is in memory, so nothing in the expression layer
+    // or the memory model has to learn a second kind of value. What these say
+    // is how to read those bits: the same word compared with Ult and with FOLt
+    // is the same word, answered as an integer once and as a float once.
+    //
+    // Only the primitives are here. Every ordered comparison LLVM has is one of
+    // these or its mirror, and every unordered one is that or FUno.
+    FOEq,
+    FOLt,
+    FOLe,
+    FUno, ///< Either side is NaN, which is what makes a comparison unordered
+
+    // Floating point arithmetic, to nearest with ties to even -- the rounding
+    // mode a C program is in unless it has asked for another, which nothing
+    // here can express.
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+
+    LastKind=FDiv,
 
     CastKindFirst=ZExt,
     CastKindLast=SExt,
     BinaryKindFirst=Add,
-    BinaryKindLast=Sge,
+    BinaryKindLast=FDiv,
     CmpKindFirst=Eq,
-    CmpKindLast=Sge
+    CmpKindLast=FUno,
+    FloatKindFirst=FOEq,
+    FloatKindLast=FDiv
   };
 
   /// @brief Required by klee::ref-managed objects
@@ -998,6 +1023,16 @@ COMPARISON_EXPR_CLASS(Sle)
 COMPARISON_EXPR_CLASS(Sgt)
 COMPARISON_EXPR_CLASS(Sge)
 
+COMPARISON_EXPR_CLASS(FOEq)
+COMPARISON_EXPR_CLASS(FOLt)
+COMPARISON_EXPR_CLASS(FOLe)
+COMPARISON_EXPR_CLASS(FUno)
+
+ARITHMETIC_EXPR_CLASS(FAdd)
+ARITHMETIC_EXPR_CLASS(FSub)
+ARITHMETIC_EXPR_CLASS(FMul)
+ARITHMETIC_EXPR_CLASS(FDiv)
+
 // Terminal Exprs
 
 class ConstantExpr : public Expr {
@@ -1155,9 +1190,29 @@ public:
   ref<ConstantExpr> Sgt(const ref<ConstantExpr> &RHS);
   ref<ConstantExpr> Sge(const ref<ConstantExpr> &RHS);
 
+  // Floating point, reading both sides as the encoding of a float of this
+  // width. Only widths llvm::APFloat has semantics for can be folded; the
+  // caller has to have checked, which fpSemanticsFor() is for.
+  ref<ConstantExpr> FAdd(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FSub(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FMul(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FDiv(const ref<ConstantExpr> &RHS);
+
+  ref<ConstantExpr> FOEq(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FOLt(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FOLe(const ref<ConstantExpr> &RHS);
+  ref<ConstantExpr> FUno(const ref<ConstantExpr> &RHS);
+
   ref<ConstantExpr> Neg();
   ref<ConstantExpr> Not();
 };
+
+/// The semantics of a float encoded in \p width bits, or null if a float is not
+/// what a word of that width is.
+///
+/// x86's 80-bit long double is the one width that is not the obvious one: it
+/// occupies 80 bits of encoding inside whatever storage the ABI gives it.
+const llvm::fltSemantics *fpSemanticsFor(Expr::Width width);
 
 // Implementations
 

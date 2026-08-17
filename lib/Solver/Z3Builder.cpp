@@ -109,6 +109,43 @@ Z3SortHandle Z3Builder::getBvSort(unsigned width) {
   return Z3SortHandle(Z3_mk_bv_sort(ctx, width), ctx);
 }
 
+Z3SortHandle Z3Builder::getFloatSort(unsigned width) {
+  // The exponent and significand widths IEEE 754 gives each format. The
+  // significand here counts the hidden bit, which is how Z3 spells it.
+  switch (width) {
+  case Expr::Int16:
+    return Z3SortHandle(Z3_mk_fpa_sort(ctx, 5, 11), ctx);
+  case Expr::Int32:
+    return Z3SortHandle(Z3_mk_fpa_sort(ctx, 8, 24), ctx);
+  case Expr::Int64:
+    return Z3SortHandle(Z3_mk_fpa_sort(ctx, 11, 53), ctx);
+  case 128:
+    return Z3SortHandle(Z3_mk_fpa_sort(ctx, 15, 113), ctx);
+  default:
+    // x87's 80-bit format has an explicit integer bit, so it is not one of
+    // Z3's, and no other width names a format at all.
+    klee_error("No floating point format is %u bits wide", width);
+  }
+}
+
+Z3ASTHandle Z3Builder::castToFloat(Z3ASTHandle bitVector) {
+  unsigned width = getBVLength(bitVector);
+  return Z3ASTHandle(
+      Z3_mk_fpa_to_fp_bv(ctx, bitVector, getFloatSort(width)), ctx);
+}
+
+Z3ASTHandle Z3Builder::castToBitVector(Z3ASTHandle floatValue) {
+  // Z3 leaves this underspecified for NaN: any of the encodings that mean NaN
+  // may come back, and which one is not fixed. Every NaN answers a comparison
+  // the same way, so no path depends on the choice; a test case can name a
+  // different NaN than the run saw.
+  return Z3ASTHandle(Z3_mk_fpa_to_ieee_bv(ctx, floatValue), ctx);
+}
+
+Z3ASTHandle Z3Builder::roundNearestTiesToEven() {
+  return Z3ASTHandle(Z3_mk_fpa_round_nearest_ties_to_even(ctx), ctx);
+}
+
 Z3SortHandle Z3Builder::getArraySort(Z3SortHandle domainSort,
                                      Z3SortHandle rangeSort) {
   // FIXME: cache these
@@ -834,6 +871,56 @@ Z3ASTHandle Z3Builder::constructActual(ref<Expr> e, int *width_out) {
     assert(*width_out != 1 && "uncanonicalized slt");
     *width_out = 1;
     return sbvLtExpr(left, right);
+  }
+
+    // Floating point. A value arrives and leaves as the bit pattern of its
+    // encoding, which is what the rest of KLEE stores and what a test case
+    // records; only in here is it read as a number. Z3's own float sort is what
+    // makes that reading exact, so the two conversions are the whole trick.
+#define FP_BINARY_ARITH(_kind, _z3op)                                          \
+  case Expr::_kind: {                                                          \
+    _kind##Expr *fe = cast<_kind##Expr>(e);                                    \
+    Z3ASTHandle left = castToFloat(construct(fe->left, width_out));            \
+    Z3ASTHandle right = castToFloat(construct(fe->right, width_out));          \
+    return castToBitVector(                                                    \
+        Z3ASTHandle(_z3op(ctx, roundNearestTiesToEven(), left, right), ctx));  \
+  }
+
+    FP_BINARY_ARITH(FAdd, Z3_mk_fpa_add)
+    FP_BINARY_ARITH(FSub, Z3_mk_fpa_sub)
+    FP_BINARY_ARITH(FMul, Z3_mk_fpa_mul)
+    FP_BINARY_ARITH(FDiv, Z3_mk_fpa_div)
+#undef FP_BINARY_ARITH
+
+    // frem has no case here on purpose. Z3's fpa_rem is IEEE remainder, which
+    // rounds the quotient to nearest, and LLVM's frem is fmod, which truncates
+    // it -- the two differ by a multiple of the divisor. Rather than answer
+    // that question wrongly, frem stays concretised, which a run says out loud.
+
+#define FP_COMPARE(_kind, _z3op)                                               \
+  case Expr::_kind: {                                                          \
+    _kind##Expr *fe = cast<_kind##Expr>(e);                                    \
+    Z3ASTHandle left = castToFloat(construct(fe->left, width_out));            \
+    Z3ASTHandle right = castToFloat(construct(fe->right, width_out));          \
+    *width_out = 1;                                                            \
+    return Z3ASTHandle(_z3op(ctx, left, right), ctx);                          \
+  }
+
+    // Each of these is false when either side is NaN, which is what makes it
+    // the ordered comparison; the unordered ones are built from these and FUno
+    // before they get here.
+    FP_COMPARE(FOEq, Z3_mk_fpa_eq)
+    FP_COMPARE(FOLt, Z3_mk_fpa_lt)
+    FP_COMPARE(FOLe, Z3_mk_fpa_leq)
+#undef FP_COMPARE
+
+  case Expr::FUno: {
+    FUnoExpr *fe = cast<FUnoExpr>(e);
+    Z3ASTHandle left = castToFloat(construct(fe->left, width_out));
+    Z3ASTHandle right = castToFloat(construct(fe->right, width_out));
+    *width_out = 1;
+    return orExpr(Z3ASTHandle(Z3_mk_fpa_is_nan(ctx, left), ctx),
+                  Z3ASTHandle(Z3_mk_fpa_is_nan(ctx, right), ctx));
   }
 
   case Expr::Sle: {

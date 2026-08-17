@@ -79,6 +79,14 @@ namespace klee {
     virtual Action visitSle(const SleExpr&);
     virtual Action visitSgt(const SgtExpr&);
     virtual Action visitSge(const SgeExpr&);
+    virtual Action visitFOEq(const FOEqExpr&);
+    virtual Action visitFOLt(const FOLtExpr&);
+    virtual Action visitFOLe(const FOLeExpr&);
+    virtual Action visitFUno(const FUnoExpr&);
+    virtual Action visitFAdd(const FAddExpr&);
+    virtual Action visitFSub(const FSubExpr&);
+    virtual Action visitFMul(const FMulExpr&);
+    virtual Action visitFDiv(const FDivExpr&);
 
   private:
     typedef ExprHashMap< ref<Expr> > visited_ty;

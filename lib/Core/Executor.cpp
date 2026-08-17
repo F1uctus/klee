@@ -171,6 +171,15 @@ cl::opt<unsigned> LazyInitDepth(
              "pointer a memory error (default=2)"),
     cl::init(2), cl::cat(TestGenCat));
 
+cl::opt<bool> FPRuntime(
+    "fp-runtime",
+    cl::desc("Execute floating point symbolically instead of concretising it. "
+             "Without this a float reaching an arithmetic instruction or a "
+             "comparison is pinned to one value, along with everything it was "
+             "computed from, so the branch is decided before it is reached "
+             "(default=false)"),
+    cl::init(false), cl::cat(TestGenCat));
+
 cl::opt<bool> LazyInitOnDeref(
     "lazy-init-on-deref",
     cl::desc("Give an object to a pointer that was read out of symbolic memory "
@@ -501,6 +510,73 @@ cl::opt<bool> DebugCheckForImpliedValues(
     "debug-check-for-implied-values", cl::init(false),
     cl::desc("Debug the implied value optimization"),
     cl::cat(DebugCat));
+
+/// Whether a float of \p width is executed symbolically rather than pinned to
+/// one value.
+///
+/// Only the widths the solver has a floating point sort for. x87's 80-bit long
+/// double is the exception among the formats a C program can name: its
+/// significand carries an explicit integer bit, which IEEE 754's interchange
+/// formats do not, so it is not one of the sorts and is concretised as before.
+bool executeFloatSymbolically(Expr::Width width) {
+  if (!FPRuntime)
+    return false;
+  return width == Expr::Int16 || width == Expr::Int32 ||
+         width == Expr::Int64 || width == 128;
+}
+
+/// The comparison LLVM's predicate \p p asks for, in terms of the four the
+/// expression layer has.
+///
+/// An ordered comparison is false when either side is NaN and an unordered one
+/// is true, so each is the corresponding ordered primitive with FUno either
+/// ruled out or allowed alongside.
+ref<Expr> buildFCmp(llvm::CmpInst::Predicate p, const ref<Expr> &l,
+                    const ref<Expr> &r) {
+  switch (p) {
+  case FCmpInst::FCMP_FALSE:
+    return klee::ConstantExpr::alloc(0, Expr::Bool);
+  case FCmpInst::FCMP_TRUE:
+    return klee::ConstantExpr::alloc(1, Expr::Bool);
+
+  case FCmpInst::FCMP_ORD:
+    return Expr::createIsZero(FUnoExpr::create(l, r));
+  case FCmpInst::FCMP_UNO:
+    return FUnoExpr::create(l, r);
+
+  case FCmpInst::FCMP_OEQ:
+    return FOEqExpr::create(l, r);
+  case FCmpInst::FCMP_OLT:
+    return FOLtExpr::create(l, r);
+  case FCmpInst::FCMP_OLE:
+    return FOLeExpr::create(l, r);
+  case FCmpInst::FCMP_OGT:
+    return FOLtExpr::create(r, l);
+  case FCmpInst::FCMP_OGE:
+    return FOLeExpr::create(r, l);
+  case FCmpInst::FCMP_ONE:
+    return AndExpr::create(Expr::createIsZero(FUnoExpr::create(l, r)),
+                           Expr::createIsZero(FOEqExpr::create(l, r)));
+
+  case FCmpInst::FCMP_UEQ:
+    return OrExpr::create(FUnoExpr::create(l, r), FOEqExpr::create(l, r));
+  case FCmpInst::FCMP_ULT:
+    return OrExpr::create(FUnoExpr::create(l, r), FOLtExpr::create(l, r));
+  case FCmpInst::FCMP_ULE:
+    return OrExpr::create(FUnoExpr::create(l, r), FOLeExpr::create(l, r));
+  case FCmpInst::FCMP_UGT:
+    return OrExpr::create(FUnoExpr::create(l, r), FOLtExpr::create(r, l));
+  case FCmpInst::FCMP_UGE:
+    return OrExpr::create(FUnoExpr::create(l, r), FOLeExpr::create(r, l));
+  case FCmpInst::FCMP_UNE:
+    // Equal is only true when ordered, so its negation is already "unordered
+    // or different".
+    return Expr::createIsZero(FOEqExpr::create(l, r));
+
+  default:
+    return nullptr;
+  }
+}
 
 } // namespace
 
@@ -2979,6 +3055,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   }
 
   case Instruction::FAdd: {
+    if (executeFloatSymbolically(getWidthForLLVMType(i->getType()))) {
+      bindLocal(ki, state,
+                FAddExpr::create(eval(ki, 0, state).value,
+                           eval(ki, 1, state).value));
+      break;
+    }
     ref<ConstantExpr> left = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     ref<ConstantExpr> right = toConstant(state, eval(ki, 1, state).value,
@@ -2994,6 +3076,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   }
 
   case Instruction::FSub: {
+    if (executeFloatSymbolically(getWidthForLLVMType(i->getType()))) {
+      bindLocal(ki, state,
+                FSubExpr::create(eval(ki, 0, state).value,
+                           eval(ki, 1, state).value));
+      break;
+    }
     ref<ConstantExpr> left = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     ref<ConstantExpr> right = toConstant(state, eval(ki, 1, state).value,
@@ -3008,6 +3096,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   }
 
   case Instruction::FMul: {
+    if (executeFloatSymbolically(getWidthForLLVMType(i->getType()))) {
+      bindLocal(ki, state,
+                FMulExpr::create(eval(ki, 0, state).value,
+                           eval(ki, 1, state).value));
+      break;
+    }
     ref<ConstantExpr> left = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     ref<ConstantExpr> right = toConstant(state, eval(ki, 1, state).value,
@@ -3023,6 +3117,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   }
 
   case Instruction::FDiv: {
+    if (executeFloatSymbolically(getWidthForLLVMType(i->getType()))) {
+      bindLocal(ki, state,
+                FDivExpr::create(eval(ki, 0, state).value,
+                           eval(ki, 1, state).value));
+      break;
+    }
     ref<ConstantExpr> left = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     ref<ConstantExpr> right = toConstant(state, eval(ki, 1, state).value,
@@ -3163,6 +3263,16 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
   case Instruction::FCmp: {
     FCmpInst *fi = cast<FCmpInst>(i);
+    if (executeFloatSymbolically(
+            getWidthForLLVMType(fi->getOperand(0)->getType()))) {
+      ref<Expr> compared = buildFCmp(fi->getPredicate(),
+                                     eval(ki, 0, state).value,
+                                     eval(ki, 1, state).value);
+      if (!compared)
+        return terminateStateOnExecError(state, "Invalid FCmp predicate");
+      bindLocal(ki, state, compared);
+      break;
+    }
     ref<ConstantExpr> left = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     ref<ConstantExpr> right = toConstant(state, eval(ki, 1, state).value,
