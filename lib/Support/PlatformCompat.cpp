@@ -21,7 +21,9 @@
 #endif
 #include <windows.h>
 
+#include <crtdbg.h>
 #include <psapi.h>
+#include <stdlib.h>
 #else
 #include <sys/resource.h>
 #include <unistd.h>
@@ -65,6 +67,32 @@ bool getProcessUserTime(std::uint64_t &microseconds) {
       static_cast<std::uint64_t>(usage.ru_utime.tv_sec) * 1000000u +
       static_cast<std::uint64_t>(usage.ru_utime.tv_usec);
   return true;
+#endif
+}
+
+void reportFailuresToStderr() {
+#if defined(_WIN32)
+  // Governs where the runtime sends assertion failures.
+  ::_set_error_mode(_OUT_TO_STDERR);
+
+  // abort() reports through Windows Error Reporting, which is a dialog of its
+  // own. Only that part is turned off: the message it writes to stderr first is
+  // worth keeping.
+  ::_set_abort_behavior(0, _CALL_REPORTFAULT);
+
+  // The same again for the failures the runtime hands to the operating system
+  // rather than reporting itself, such as a fault or a missing device.
+  ::SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+
+  // A debug runtime reports through a separate mechanism that _set_error_mode
+  // does not cover.
+#if defined(_DEBUG)
+  for (int report : {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT}) {
+    ::_CrtSetReportMode(report, _CRTDBG_MODE_FILE);
+    ::_CrtSetReportFile(report, _CRTDBG_FILE_STDERR);
+  }
+#endif
 #endif
 }
 

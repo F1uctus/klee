@@ -30,8 +30,10 @@
 #include "klee/Support/CompilerWarning.h"
 DISABLE_WARNING_PUSH
 DISABLE_WARNING_DEPRECATED_DECLARATIONS
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 DISABLE_WARNING_POP
@@ -81,6 +83,12 @@ static constexpr std::array handlerInfo = {
   addDNR("__assert_fail", handleAssertFail),
   addDNR("__assert", handleAssertFail),
   addDNR("_assert", handleAssert),
+  // The Windows C runtime's spelling of the same thing. Without it an assert()
+  // in a tested program is dispatched externally instead of being reported:
+  // the failure escapes into KLEE's own process, where it stops the run with a
+  // dialog nobody is there to dismiss, and the path is explored as if the
+  // assertion had held.
+  addDNR("_wassert", handleWideAssert),
   addDNR("klee_assert_fail", handleAssertFail),
   addDNR("abort", handleAbort),
   addDNR("_exit", handleExit),
@@ -321,12 +329,80 @@ void SpecialFunctionHandler::handleSilentExit(
   executor.terminateStateEarlyUser(state, "");
 }
 
+// reads a concrete wide string from memory
+std::string
+SpecialFunctionHandler::readWideStringAtAddress(ExecutionState &state,
+                                                ref<Expr> addressExpr) {
+  ObjectPair op;
+  addressExpr = executor.toUnique(state, addressExpr);
+  if (!isa<ConstantExpr>(addressExpr)) {
+    executor.terminateStateOnUserError(
+        state, "Symbolic string pointer passed to one of the klee_ functions");
+    return "";
+  }
+  ref<ConstantExpr> address = cast<ConstantExpr>(addressExpr);
+  if (!state.addressSpace.resolveOne(address, op)) {
+    executor.terminateStateOnUserError(
+        state, "Invalid string pointer passed to one of the klee_ functions");
+    return "";
+  }
+  const MemoryObject *mo = op.first;
+  const ObjectState *os = op.second;
+
+  auto relativeOffset = mo->getOffsetExpr(address);
+  // the relativeOffset must be concrete as the address is concrete
+  size_t offset = cast<ConstantExpr>(relativeOffset)->getZExtValue();
+
+  // A wide character is two bytes here: this models the Windows runtime, whose
+  // wchar_t is 16 bits whatever the host's happens to be.
+  llvm::SmallVector<llvm::UTF16, 64> units;
+  bool terminated = false;
+  for (size_t i = offset; i + 1 < mo->size; i += 2) {
+    ref<Expr> cur = os->read(i, Expr::Int16);
+    cur = executor.toUnique(state, cur);
+    assert(isa<ConstantExpr>(cur) &&
+           "hit symbolic char while reading concrete string");
+    auto unit = cast<ConstantExpr>(cur)->getZExtValue(16);
+    if (unit == 0) {
+      terminated = true;
+      break;
+    }
+
+    units.push_back(static_cast<llvm::UTF16>(unit));
+  }
+
+  if (!terminated) {
+    klee_warning_once(0, "String not terminated by \\0 passed to "
+                         "one of the klee_ functions");
+  }
+
+  std::string result;
+  if (!llvm::convertUTF16ToUTF8String(units, result)) {
+    // Ill-formed, so there is nothing faithful to report. Keep whatever is
+    // representable rather than losing the message altogether.
+    result.clear();
+    for (auto unit : units)
+      result.push_back(unit < 0x80 ? static_cast<char>(unit) : '?');
+  }
+
+  return result;
+}
+
 void SpecialFunctionHandler::handleAssert(ExecutionState &state,
                                           KInstruction *target,
                                           std::vector<ref<Expr>> &arguments) {
   assert(arguments.size() == 3 && "invalid number of arguments to _assert");
   executor.terminateStateOnProgramError(
       state, "ASSERTION FAIL: " + readStringAtAddress(state, arguments[0]),
+      StateTerminationType::Assert);
+}
+
+void SpecialFunctionHandler::handleWideAssert(
+    ExecutionState &state, KInstruction *target,
+    std::vector<ref<Expr>> &arguments) {
+  assert(arguments.size() == 3 && "invalid number of arguments to _wassert");
+  executor.terminateStateOnProgramError(
+      state, "ASSERTION FAIL: " + readWideStringAtAddress(state, arguments[0]),
       StateTerminationType::Assert);
 }
 

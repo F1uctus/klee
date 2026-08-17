@@ -52,6 +52,17 @@ bool getProcessUserTime(std::uint64_t &microseconds);
 /// stays correct.
 bool getMinorPageFaultCount(std::uint64_t &faults);
 
+/// Directs the C runtime to print failures to the standard error stream rather
+/// than presenting them in a window, and does nothing where that is already the
+/// case.
+///
+/// A tested program reaches the platform's assertion routine through an
+/// external call, and the Windows runtime reports an assertion, an abort() and
+/// a fault alike with a modal dialog. Nothing continues until somebody presses
+/// a button, so a single assertion in a test case stalls an unattended run for
+/// as long as it is given -- which for a test suite is until it is killed.
+void reportFailuresToStderr();
+
 /// Returns the identifier of the calling process.
 inline int getProcessID() {
 #if defined(_WIN32)

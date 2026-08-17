@@ -1328,6 +1328,10 @@ linkWithUclibc(StringRef libDir, std::string opt_suffix,
 int main(int argc, char **argv, char **envp) {
   atexit(llvm_shutdown); // Call llvm_shutdown() on exit
 
+  // Before anything can fail, and in particular before the first external call
+  // into a tested program's assert().
+  reportFailuresToStderr();
+
   KCommandLine::KeepOnlyCategories(
      {&ChecksCat,      &DebugCat,    &ExtCallsCat, &ExprCat,     &LinkCat,
       &MemoryCat,      &MergeCat,    &MiscCat,     &ModuleCat,   &ReplayCat,

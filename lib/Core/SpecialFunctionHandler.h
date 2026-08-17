@@ -73,6 +73,12 @@ namespace klee {
 
     std::string readStringAtAddress(ExecutionState &state, ref<Expr> address);
 
+    /// Reads a concrete UTF-16 string and returns it as UTF-8. The Windows C
+    /// runtime reports through wide strings, so a module built against it
+    /// passes them to the handlers below.
+    std::string readWideStringAtAddress(ExecutionState &state,
+                                        ref<Expr> address);
+
     /// Reads \p bytes bytes at \p address as one expression each, leaving them
     /// symbolic. Unlike the string readers this is for a buffer whose contents
     /// are the point, not a name to look at. Returns false and terminates the
@@ -89,6 +95,7 @@ namespace klee {
     HANDLER(handleAbort);
     HANDLER(handleAssert);
     HANDLER(handleAssertFail);
+    HANDLER(handleWideAssert);
     HANDLER(handleAssume);
     HANDLER(handleCalloc);
     HANDLER(handleCheckMemoryAccess);
