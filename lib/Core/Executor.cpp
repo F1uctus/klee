@@ -124,6 +124,14 @@ cl::OptionCategory
 cl::OptionCategory TestGenCat("Test generation options",
                               "These options impact test generation.");
 
+cl::opt<std::string> TimeoutPerFunction(
+    "timeout-per-function",
+    cl::desc("Halt each entry point of an --entrypoints-file batch after this "
+             "long, and go on to the next. Unlike --max-time, which is the "
+             "budget for the whole run, this one starts again for each "
+             "(default=0s (off))"),
+    cl::init("0s"), cl::cat(TerminationCat));
+
 cl::opt<std::string> MaxTime(
     "max-time",
     cl::desc("Halt execution after the specified duration.  "
@@ -608,6 +616,20 @@ Executor::Executor(LLVMContext &ctx, const InterpreterOptions &opts,
         setHaltExecution(true);
       }));
 
+  // Checked on the group's own tick rather than armed for one deadline,
+  // because the deadline moves: each entry point of a batch sets its own. This
+  // does not go through setHaltExecution, so a batch can tell "this function
+  // has had its time" from "stop the run".
+  if (time::Span{TimeoutPerFunction})
+    timers.add(std::make_unique<Timer>(
+        time::Span{TimerInterval}, [&] {
+          if (entryPointDeadlineSet && !haltExecution &&
+              time::getWallTime() >= entryPointDeadline) {
+            klee_message("Entry point timeout invoked");
+            haltExecution = true;
+          }
+        }));
+
   coreSolverTimeout = time::Span{MaxCoreSolverTime};
   if (coreSolverTimeout) UseForkedCoreSolver = true;
   std::unique_ptr<Solver> coreSolver = klee::createCoreSolver(CoreSolverToUse);
@@ -687,6 +709,10 @@ Executor::setModule(std::vector<std::unique_ptr<llvm::Module>> &modules,
   specialFunctionHandler->prepare(preservedFunctions);
 
   preservedFunctions.push_back(opts.EntryPoint.c_str());
+  // The rest of a batch. Without this they are internalised as unreachable and
+  // the run reaches the second one to find it is no longer there.
+  for (const std::string &entryPoint : opts.EntryPoints)
+    preservedFunctions.push_back(entryPoint.c_str());
 
   // Preserve the free-standing library calls
   preservedFunctions.push_back("memset");
@@ -5393,7 +5419,21 @@ ref<Expr> Executor::makeSymbolicArgument(ExecutionState &state, Function *f,
   return mo->getBaseExpr();
 }
 
+void Executor::beginEntryPoint() {
+  // A batch runs each entry point in turn, so the flag one of them raised must
+  // not stop the rest. What stopped the run for good stays stopped.
+  if (!haltedForGood)
+    haltExecution = false;
+
+  const time::Span perFunction{TimeoutPerFunction};
+  entryPointDeadlineSet = static_cast<bool>(perFunction);
+  if (entryPointDeadlineSet)
+    entryPointDeadline = time::getWallTime() + perFunction;
+  timers.reset();
+}
+
 void Executor::runFunctionSymbolically(Function *f) {
+  beginEntryPoint();
   // force deterministic initialization of memory objects
   srand(1);
   klee::seedRandom(1);
@@ -5433,7 +5473,16 @@ void Executor::runFunctionSymbolically(Function *f) {
   executionTree = nullptr;
 
   // hack to clear memory objects
+  //
+  // The replacement needs its arenas reserved as much as the original did.
+  // setModule does that once, which was enough while a process ran one entry
+  // point; a second one then started against a manager whose factories were
+  // never initialised, and the deterministic allocator handed out addresses
+  // from a mapping that did not exist. Released before the replacement is
+  // built, so the two never hold reservations at the same time.
+  memory.reset();
   memory = std::make_unique<MemoryManager>(&arrayCache);
+  memory->initializeAllocators();
 
   globalObjects.clear();
   globalAddresses.clear();
@@ -5446,6 +5495,8 @@ void Executor::runFunctionAsMain(Function *f,
 				 int argc,
 				 char **argv,
 				 char **envp) {
+  beginEntryPoint();
+
   std::vector<ref<Expr> > arguments;
 
   // force deterministic initialization of memory objects
@@ -5541,7 +5592,16 @@ void Executor::runFunctionAsMain(Function *f,
   executionTree = nullptr;
 
   // hack to clear memory objects
+  //
+  // The replacement needs its arenas reserved as much as the original did.
+  // setModule does that once, which was enough while a process ran one entry
+  // point; a second one then started against a manager whose factories were
+  // never initialised, and the deterministic allocator handed out addresses
+  // from a mapping that did not exist. Released before the replacement is
+  // built, so the two never hold reservations at the same time.
+  memory.reset();
   memory = std::make_unique<MemoryManager>(&arrayCache);
+  memory->initializeAllocators();
 
   globalObjects.clear();
   globalAddresses.clear();

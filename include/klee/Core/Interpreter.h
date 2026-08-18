@@ -88,12 +88,21 @@ public:
     bool CheckDivZero;
     bool CheckOvershift;
 
+    /// Every entry point a batch will run, when there is more than one.
+    ///
+    /// Preparation internalises and drops what the entry point cannot reach,
+    /// so a function that is only going to be entered later has to be named
+    /// here or it will not be there to enter.
+    std::vector<std::string> EntryPoints;
+
     ModuleOptions(const std::string &_LibraryDir,
                   const std::string &_EntryPoint, const std::string &_OptSuffix,
-                  bool _Optimize, bool _CheckDivZero, bool _CheckOvershift)
+                  bool _Optimize, bool _CheckDivZero, bool _CheckOvershift,
+                  std::vector<std::string> _EntryPoints = {})
         : LibraryDir(_LibraryDir), EntryPoint(_EntryPoint),
           OptSuffix(_OptSuffix), Optimize(_Optimize),
-          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift) {}
+          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift),
+          EntryPoints(std::move(_EntryPoints)) {}
   };
 
   enum LogType
@@ -180,6 +189,12 @@ public:
   /*** Runtime options ***/
 
   virtual void setHaltExecution(bool value) = 0;
+
+  /// Whether the run was stopped for a reason that outlives one entry point --
+  /// the whole-run budget, or somebody asking it to stop -- rather than by one
+  /// entry point using up its own time. A batch keeps going after the second
+  /// and stops after the first.
+  virtual bool hasHaltedForGood() const = 0;
 
   virtual void setInhibitForking(bool value) = 0;
 

@@ -143,6 +143,14 @@ namespace {
              cl::init("main"),
              cl::cat(StartCat));
 
+  cl::opt<std::string> EntryPointsFile(
+      "entrypoints-file",
+      cl::desc("File naming one entry point per line, each run in turn against "
+               "the module loaded once. Test cases go to a subdirectory of "
+               "--output-dir named after the entry point. Overrides "
+               "--entry-point"),
+      cl::cat(StartCat));
+
   cl::opt<bool> SymbolicEntryArgs(
       "symbolic-entry-args",
       cl::desc("Start the entry point with every parameter symbolic instead of "
@@ -380,6 +388,10 @@ private:
   std::unique_ptr<llvm::raw_ostream> m_infoFile;
 
   SmallString<128> m_outputDirectory;
+  /// What --output-dir named, before any entry point subdirectory. The run's
+  /// own files -- assembly.ll, run.stats, info -- stay here; only test cases
+  /// move, so a reader can tell which entry point produced which.
+  SmallString<128> m_baseOutputDirectory;
 
   unsigned m_numTotalTests;     // Number of tests received from the interpreter
   unsigned m_numGeneratedTests; // Number of tests successfully generated
@@ -404,6 +416,11 @@ public:
     m_pathsExplored += num; }
 
   void setInterpreter(Interpreter *i);
+
+  /// Directs test cases into a subdirectory named for the entry point about to
+  /// run, and starts their numbering again, so each entry point's output reads
+  /// as though it were the only one.
+  void useEntryPointDirectory(const std::string &entryPoint);
 
   void processTestCase(const ExecutionState  &state,
                        const char *errorMessage,
@@ -495,6 +512,7 @@ KleeHandler::KleeHandler(int argc, char **argv)
   }
 
   klee_message("output directory is \"%s\"", m_outputDirectory.c_str());
+  m_baseOutputDirectory = m_outputDirectory;
 
   // open warnings.txt
   std::string file_path = getOutputFilename("warnings.txt");
@@ -531,6 +549,19 @@ void KleeHandler::setInterpreter(Interpreter *i) {
     assert(m_symPathWriter->good());
     m_interpreter->setSymbolicPathWriter(m_symPathWriter);
   }
+}
+
+void KleeHandler::useEntryPointDirectory(const std::string &entryPoint) {
+  SmallString<128> directory = m_baseOutputDirectory;
+  sys::path::append(directory, entryPoint);
+
+  if (std::error_code ec = sys::fs::create_directories(directory.c_str()))
+    klee_error("cannot create \"%s\": %s", directory.c_str(),
+               ec.message().c_str());
+
+  m_outputDirectory = directory;
+  m_numTotalTests = 0;
+  m_numGeneratedTests = 0;
 }
 
 std::string KleeHandler::getOutputFilename(const std::string &filename) {
@@ -1544,11 +1575,30 @@ int main(int argc, char **argv, char **envp) {
   // Push the module as the first entry
   loadedModules.emplace_back(std::move(M));
 
+  // Read before the module is prepared, because preparation drops what the
+  // entry point cannot reach and every one of these is going to be entered.
+  std::vector<std::string> entryPoints;
+  if (!EntryPointsFile.empty()) {
+    std::ifstream file(EntryPointsFile);
+    if (!file)
+      klee_error("cannot read entry points from '%s'", EntryPointsFile.c_str());
+    for (std::string name; std::getline(file, name);) {
+      // A file written on Windows and read here, or the other way round.
+      while (!name.empty() && (name.back() == '\r' || name.back() == ' '))
+        name.pop_back();
+      if (!name.empty())
+        entryPoints.push_back(name);
+    }
+    if (entryPoints.empty())
+      klee_error("no entry points named in '%s'", EntryPointsFile.c_str());
+  }
+
   std::string LibraryDir = KleeHandler::getRunTimeLibraryPath(argv[0]);
   Interpreter::ModuleOptions Opts(LibraryDir.c_str(), EntryPoint, opt_suffix,
                                   /*Optimize=*/OptimizeModule,
                                   /*CheckDivZero=*/CheckDivZero,
-                                  /*CheckOvershift=*/CheckOvershift);
+                                  /*CheckOvershift=*/CheckOvershift,
+                                  entryPoints);
 
   // Get the main function
   for (auto &module : loadedModules) {
@@ -1887,10 +1937,35 @@ int main(int argc, char **argv, char **envp) {
       }
     }
 
-    if (SymbolicEntryArgs)
-      interpreter->runFunctionSymbolically(entryFn);
-    else
-      interpreter->runFunctionAsMain(entryFn, pArgc, pArgv, pEnvp);
+    // One run per entry point, over the module that was loaded, linked and
+    // prepared once. Doing it a process at a time instead spends that
+    // preparation again for every function, which on a whole-project module is
+    // most of the wall clock.
+    if (entryPoints.empty()) {
+      if (SymbolicEntryArgs)
+        interpreter->runFunctionSymbolically(entryFn);
+      else
+        interpreter->runFunctionAsMain(entryFn, pArgc, pArgv, pEnvp);
+    } else {
+      for (const std::string &name : entryPoints) {
+        Function *f = finalModule->getFunction(name);
+        if (!f) {
+          klee_warning("Entry function '%s' not found in module, skipping it",
+                       name.c_str());
+          continue;
+        }
+        // Each gets its own directory and its own numbering, so a reader can
+        // tell whose test case is whose without parsing anything.
+        handler->useEntryPointDirectory(name);
+        klee_message("Running entry point %s", name.c_str());
+        if (SymbolicEntryArgs)
+          interpreter->runFunctionSymbolically(f);
+        else
+          interpreter->runFunctionAsMain(f, pArgc, pArgv, pEnvp);
+        if (interpreter->hasHaltedForGood())
+          break;
+      }
+    }
 
     while (!seeds.empty()) {
       kTest_free(seeds.back());

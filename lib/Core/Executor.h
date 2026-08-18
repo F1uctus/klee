@@ -173,7 +173,19 @@ private:
 
   /// Signals the executor to halt execution at the next instruction
   /// step.
-  bool haltExecution;  
+  bool haltExecution;
+
+  /// Whether that halt was for a reason that outlives one entry point.
+  bool haltedForGood = false;
+
+  /// When the entry point now running must stop, if --timeout-per-function was
+  /// given. Refreshed by each one, so the budget is per function rather than
+  /// shared out among them.
+  time::Point entryPointDeadline;
+  bool entryPointDeadlineSet = false;
+
+  /// Puts the halt flag back and starts \p f's own budget.
+  void beginEntryPoint();
 
   /// Whether implied-value concretization is enabled. Currently
   /// false, it is buggy (it needs to validate its writes).
@@ -618,7 +630,16 @@ public:
 
   /*** Runtime options ***/
 
-  void setHaltExecution(bool value) override { haltExecution = value; }
+  void setHaltExecution(bool value) override {
+    haltExecution = value;
+    // Everything that reaches here is the run being asked to stop: the
+    // whole-run --max-time, an interrupt, the watchdog. A single entry point
+    // running out of its own time does not come through here.
+    if (value)
+      haltedForGood = true;
+  }
+
+  bool hasHaltedForGood() const override { return haltedForGood; }
 
   void setInhibitForking(bool value) override { inhibitForking = value; }
 
