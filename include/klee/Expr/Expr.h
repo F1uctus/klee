@@ -196,7 +196,19 @@ public:
     FMul,
     FDiv,
 
-    LastKind=FDiv,
+    // Conversions between a floating point value and something of another
+    // width or another interpretation. These carry a target width the way ZExt
+    // and SExt do, and they are what keeps an integer from being pinned the
+    // moment it reaches a float: without them the operand is concretised, and
+    // everything it was computed from is pinned with it.
+    FPExt,   ///< To a wider float, exactly
+    FPTrunc, ///< To a narrower float, to nearest
+    FPToSI,  ///< To a signed integer, toward zero
+    FPToUI,  ///< To an unsigned integer, toward zero
+    SIToFP,  ///< From a signed integer, to nearest
+    UIToFP,  ///< From an unsigned integer, to nearest
+
+    LastKind=UIToFP,
 
     CastKindFirst=ZExt,
     CastKindLast=SExt,
@@ -205,7 +217,9 @@ public:
     CmpKindFirst=Eq,
     CmpKindLast=FUno,
     FloatKindFirst=FOEq,
-    FloatKindLast=FDiv
+    FloatKindLast=UIToFP,
+    FloatCastKindFirst=FPExt,
+    FloatCastKindLast=UIToFP
   };
 
   /// @brief Required by klee::ref-managed objects
@@ -1033,6 +1047,75 @@ ARITHMETIC_EXPR_CLASS(FSub)
 ARITHMETIC_EXPR_CLASS(FMul)
 ARITHMETIC_EXPR_CLASS(FDiv)
 
+/// A conversion into or out of a floating point interpretation.
+///
+/// Shaped like CastExpr -- one operand and the width to produce -- but kept
+/// apart from it, because the code that reasons about casts generically reasons
+/// about zero and sign extension, which these are not: the bits change, and for
+/// three of the six the meaning of the bits changes as well. \p src carries its
+/// own width, so which direction a conversion goes is read off the two.
+class FloatCastExpr : public NonConstantExpr {
+public:
+  ref<Expr> src;
+  Width width;
+
+public:
+  FloatCastExpr(const ref<Expr> &e, Width w) : src(e), width(w) {}
+
+  Width getWidth() const { return width; }
+
+  unsigned getNumKids() const { return 1; }
+  ref<Expr> getKid(unsigned i) const { return (i == 0) ? src : 0; }
+
+  static bool needsResultType() { return true; }
+
+  int compareContents(const Expr &b) const {
+    const FloatCastExpr &eb = static_cast<const FloatCastExpr &>(b);
+    if (width != eb.width) return width < eb.width ? -1 : 1;
+    return 0;
+  }
+
+  virtual unsigned computeHash();
+
+  static bool classof(const Expr *E) {
+    Expr::Kind k = E->getKind();
+    return Expr::FloatCastKindFirst <= k && k <= Expr::FloatCastKindLast;
+  }
+  static bool classof(const FloatCastExpr *) { return true; }
+};
+
+#define FLOAT_CAST_EXPR_CLASS(_class_kind)                                     \
+  class _class_kind##Expr : public FloatCastExpr {                             \
+  public:                                                                      \
+    static const Kind kind = _class_kind;                                      \
+    static const unsigned numKids = 1;                                         \
+                                                                               \
+  public:                                                                      \
+    _class_kind##Expr(ref<Expr> e, Width w) : FloatCastExpr(e, w) {}           \
+    static ref<Expr> alloc(const ref<Expr> &e, Width w) {                      \
+      ref<Expr> r(new _class_kind##Expr(e, w));                                \
+      r->computeHash();                                                        \
+      return r;                                                                \
+    }                                                                          \
+    static ref<Expr> create(const ref<Expr> &e, Width w);                      \
+    Kind getKind() const { return _class_kind; }                               \
+    virtual ref<Expr> rebuild(ref<Expr> kids[]) const {                        \
+      return create(kids[0], width);                                           \
+    }                                                                          \
+                                                                               \
+    static bool classof(const Expr *E) {                                       \
+      return E->getKind() == Expr::_class_kind;                                \
+    }                                                                          \
+    static bool classof(const _class_kind##Expr *) { return true; }            \
+  };
+
+FLOAT_CAST_EXPR_CLASS(FPExt)
+FLOAT_CAST_EXPR_CLASS(FPTrunc)
+FLOAT_CAST_EXPR_CLASS(FPToSI)
+FLOAT_CAST_EXPR_CLASS(FPToUI)
+FLOAT_CAST_EXPR_CLASS(SIToFP)
+FLOAT_CAST_EXPR_CLASS(UIToFP)
+
 // Terminal Exprs
 
 class ConstantExpr : public Expr {
@@ -1202,6 +1285,13 @@ public:
   ref<ConstantExpr> FOLt(const ref<ConstantExpr> &RHS);
   ref<ConstantExpr> FOLe(const ref<ConstantExpr> &RHS);
   ref<ConstantExpr> FUno(const ref<ConstantExpr> &RHS);
+
+  ref<ConstantExpr> FPExt(Width W);
+  ref<ConstantExpr> FPTrunc(Width W);
+  ref<ConstantExpr> FPToSI(Width W);
+  ref<ConstantExpr> FPToUI(Width W);
+  ref<ConstantExpr> SIToFP(Width W);
+  ref<ConstantExpr> UIToFP(Width W);
 
   ref<ConstantExpr> Neg();
   ref<ConstantExpr> Not();

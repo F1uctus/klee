@@ -923,6 +923,53 @@ Z3ASTHandle Z3Builder::constructActual(ref<Expr> e, int *width_out) {
                   Z3ASTHandle(Z3_mk_fpa_is_nan(ctx, right), ctx));
   }
 
+    // Conversions. Widening and narrowing between two float formats read and
+    // write a float; the other four have an integer on one side, and there the
+    // bit pattern that arrives or leaves *is* the integer, so only the float
+    // end is converted.
+  case Expr::FPExt:
+  case Expr::FPTrunc: {
+    FloatCastExpr *fe = cast<FloatCastExpr>(e);
+    Z3ASTHandle src = castToFloat(construct(fe->src, width_out));
+    *width_out = fe->getWidth();
+    return castToBitVector(Z3ASTHandle(
+        Z3_mk_fpa_to_fp_float(ctx, roundNearestTiesToEven(), src,
+                              getFloatSort(fe->getWidth())),
+        ctx));
+  }
+
+    // Toward zero, which is the rounding C specifies for this direction and the
+    // only one fptosi and fptoui have. A value that does not fit, and NaN, are
+    // poison in LLVM and unspecified in Z3 alike, so neither is made to answer.
+#define FP_TO_INTEGER(_kind, _z3op)                                            \
+  case Expr::_kind: {                                                          \
+    FloatCastExpr *fe = cast<FloatCastExpr>(e);                                \
+    Z3ASTHandle src = castToFloat(construct(fe->src, width_out));              \
+    *width_out = fe->getWidth();                                               \
+    return Z3ASTHandle(_z3op(ctx, Z3_mk_fpa_round_toward_zero(ctx), src,       \
+                             fe->getWidth()),                                  \
+                       ctx);                                                   \
+  }
+
+    FP_TO_INTEGER(FPToSI, Z3_mk_fpa_to_sbv)
+    FP_TO_INTEGER(FPToUI, Z3_mk_fpa_to_ubv)
+#undef FP_TO_INTEGER
+
+#define INTEGER_TO_FP(_kind, _z3op)                                            \
+  case Expr::_kind: {                                                          \
+    FloatCastExpr *fe = cast<FloatCastExpr>(e);                                \
+    Z3ASTHandle src = construct(fe->src, width_out);                           \
+    *width_out = fe->getWidth();                                               \
+    return castToBitVector(                                                    \
+        Z3ASTHandle(_z3op(ctx, roundNearestTiesToEven(), src,                  \
+                          getFloatSort(fe->getWidth())),                       \
+                    ctx));                                                     \
+  }
+
+    INTEGER_TO_FP(SIToFP, Z3_mk_fpa_to_fp_signed)
+    INTEGER_TO_FP(UIToFP, Z3_mk_fpa_to_fp_unsigned)
+#undef INTEGER_TO_FP
+
   case Expr::Sle: {
     SleExpr *se = cast<SleExpr>(e);
     Z3ASTHandle left = construct(se->left, width_out);

@@ -28,6 +28,24 @@
 // NaN is a value like any other, and the ordered comparisons are false for it
 // while the unordered ones are true -- which is the whole difference between
 // the two families, and is a branch of its own.
+// An integer that reaches a float conversion was pinned for the rest of the
+// path, so every branch downstream of it became infeasible -- the same
+// three-branch function yielding one test case, from the other direction.
+// RUN: rm -rf %t.conv.concrete
+// RUN: %klee --output-dir=%t.conv.concrete --entry-point=convert_driver %t1.bc 2>&1 | FileCheck --check-prefix=CONVCONC %s
+// CONVCONC: completed paths = 1
+
+// RUN: rm -rf %t.conv
+// RUN: %klee --output-dir=%t.conv --fp-runtime --entry-point=convert_driver %t1.bc 2>&1 | FileCheck --check-prefix=CONV %s
+// RUN: not grep "reason: floating point" %t.conv/messages.txt
+// CONV: completed paths = 3
+
+// Back the other way, and between the two float formats, and negation.
+// RUN: rm -rf %t.round
+// RUN: %klee --output-dir=%t.round --fp-runtime --entry-point=roundtrip_driver %t1.bc 2>&1 | FileCheck --check-prefix=ROUND %s
+// RUN: not grep "reason: floating point" %t.round/messages.txt
+// ROUND: completed paths = 3
+
 // RUN: rm -rf %t.nan
 // RUN: %klee --output-dir=%t.nan --fp-runtime --entry-point=ordering_driver %t1.bc 2>&1 | FileCheck --check-prefix=NAN %s
 // NAN: completed paths = 2
@@ -72,6 +90,33 @@ int ordering_driver(void) {
   klee_make_symbolic(&a, sizeof(a), "a");
   klee_make_symbolic(&b, sizeof(b), "b");
   if (!(a < b) != (a >= b))
+    return 1;
+  return 0;
+}
+
+// An integer on the way in: without the conversion the multiplication never
+// sees anything but one pinned value.
+int convert_driver(void) {
+  int raw;
+  klee_make_symbolic(&raw, sizeof(raw), "raw");
+  float volts = (float)raw * 3.3f / 4095.0f;
+  if (volts > 3.0f)
+    return 2;
+  if (volts > 1.0f)
+    return 1;
+  return 0;
+}
+
+// An integer on the way out, a widening and a narrowing between the two
+// formats, and a negation -- which is the sign bit and needs no float sort.
+int roundtrip_driver(void) {
+  int raw;
+  klee_make_symbolic(&raw, sizeof(raw), "raw");
+  double wide = (double)raw / 4095.0;
+  int step = (int)(-(float)wide * -10.0f);
+  if (step > 7)
+    return 2;
+  if (step > 3)
     return 1;
   return 0;
 }

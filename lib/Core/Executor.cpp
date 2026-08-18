@@ -3050,6 +3050,18 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
 
     // Floating point instructions
   case Instruction::FNeg: {
+    // Negation is the sign bit and nothing else -- that is what fneg means, for
+    // NaN and the zeroes as much as for anything else -- so it needs no float
+    // sort and works for every width, x87's included.
+    if (FPRuntime) {
+      ref<Expr> operand = eval(ki, 0, state).value;
+      Expr::Width width = operand->getWidth();
+      bindLocal(ki, state,
+                XorExpr::create(operand,
+                                ConstantExpr::alloc(
+                                    llvm::APInt::getSignedMinValue(width))));
+      break;
+    }
     ref<ConstantExpr> arg =
         toConstant(state, eval(ki, 0, state).value, "floating point");
     if (!fpWidthToSemantics(arg->getWidth()))
@@ -3162,6 +3174,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::FPTrunc: {
     FPTruncInst *fi = cast<FPTruncInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(resultType) &&
+        executeFloatSymbolically(eval(ki, 0, state).value->getWidth())) {
+      bindLocal(ki, state,
+                FPTruncExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                        "floating point");
     if (!fpWidthToSemantics(arg->getWidth()) || resultType > arg->getWidth())
@@ -3179,6 +3197,12 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::FPExt: {
     FPExtInst *fi = cast<FPExtInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(resultType) &&
+        executeFloatSymbolically(eval(ki, 0, state).value->getWidth())) {
+      bindLocal(ki, state,
+                FPExtExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                         "floating point");
     if (!fpWidthToSemantics(arg->getWidth()) || arg->getWidth() > resultType)
@@ -3195,6 +3219,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::FPToUI: {
     FPToUIInst *fi = cast<FPToUIInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(eval(ki, 0, state).value->getWidth())) {
+      bindLocal(ki, state,
+                FPToUIExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                        "floating point");
     if (!fpWidthToSemantics(arg->getWidth()) || resultType > 64)
@@ -3217,6 +3246,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::FPToSI: {
     FPToSIInst *fi = cast<FPToSIInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(eval(ki, 0, state).value->getWidth())) {
+      bindLocal(ki, state,
+                FPToSIExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                        "floating point");
     if (!fpWidthToSemantics(arg->getWidth()) || resultType > 64)
@@ -3239,6 +3273,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::UIToFP: {
     UIToFPInst *fi = cast<UIToFPInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(resultType)) {
+      bindLocal(ki, state,
+                UIToFPExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                        "floating point");
     const llvm::fltSemantics *semantics = fpWidthToSemantics(resultType);
@@ -3255,6 +3294,11 @@ void Executor::executeInstruction(ExecutionState &state, KInstruction *ki) {
   case Instruction::SIToFP: {
     SIToFPInst *fi = cast<SIToFPInst>(i);
     Expr::Width resultType = getWidthForLLVMType(fi->getType());
+    if (executeFloatSymbolically(resultType)) {
+      bindLocal(ki, state,
+                SIToFPExpr::create(eval(ki, 0, state).value, resultType));
+      break;
+    }
     ref<ConstantExpr> arg = toConstant(state, eval(ki, 0, state).value,
                                        "floating point");
     const llvm::fltSemantics *semantics = fpWidthToSemantics(resultType);

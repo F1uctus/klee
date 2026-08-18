@@ -96,6 +96,12 @@ ref<Expr> ExprVisitor::visitActual(const ref<Expr> &e) {
     case Expr::FSub: res = visitFSub(static_cast<FSubExpr&>(ep)); break;
     case Expr::FMul: res = visitFMul(static_cast<FMulExpr&>(ep)); break;
     case Expr::FDiv: res = visitFDiv(static_cast<FDivExpr&>(ep)); break;
+    case Expr::FPExt: res = visitFPExt(static_cast<FPExtExpr&>(ep)); break;
+    case Expr::FPTrunc: res = visitFPTrunc(static_cast<FPTruncExpr&>(ep)); break;
+    case Expr::FPToSI: res = visitFPToSI(static_cast<FPToSIExpr&>(ep)); break;
+    case Expr::FPToUI: res = visitFPToUI(static_cast<FPToUIExpr&>(ep)); break;
+    case Expr::SIToFP: res = visitSIToFP(static_cast<SIToFPExpr&>(ep)); break;
+    case Expr::UIToFP: res = visitUIToFP(static_cast<UIToFPExpr&>(ep)); break;
     case Expr::Constant:
     default:
       assert(0 && "invalid expression kind");
@@ -295,6 +301,30 @@ ExprVisitor::Action ExprVisitor::visitFMul(const FMulExpr &) {
 }
 
 ExprVisitor::Action ExprVisitor::visitFDiv(const FDivExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFPExt(const FPExtExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFPTrunc(const FPTruncExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFPToSI(const FPToSIExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitFPToUI(const FPToUIExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitSIToFP(const SIToFPExpr &) {
+  return Action::doChildren();
+}
+
+ExprVisitor::Action ExprVisitor::visitUIToFP(const UIToFPExpr &) {
   return Action::doChildren();
 }
 

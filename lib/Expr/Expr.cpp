@@ -172,6 +172,12 @@ void Expr::printKind(llvm::raw_ostream &os, Kind k) {
     X(FSub);
     X(FMul);
     X(FDiv);
+    X(FPExt);
+    X(FPTrunc);
+    X(FPToSI);
+    X(FPToUI);
+    X(SIToFP);
+    X(UIToFP);
 #undef X
   default:
     assert(0 && "invalid kind");
@@ -208,6 +214,12 @@ unsigned ConstantExpr::computeHash() {
 }
 
 unsigned CastExpr::computeHash() {
+  unsigned res = getWidth() * Expr::MAGIC_HASH_CONSTANT;
+  hashValue = res ^ src->hash() * Expr::MAGIC_HASH_CONSTANT;
+  return hashValue;
+}
+
+unsigned FloatCastExpr::computeHash() {
   unsigned res = getWidth() * Expr::MAGIC_HASH_CONSTANT;
   hashValue = res ^ src->hash() * Expr::MAGIC_HASH_CONSTANT;
   return hashValue;
@@ -313,6 +325,15 @@ ref<Expr> Expr::createFromKind(Kind k, std::vector<CreateArg> args) {
       BINARY_EXPR_CASE(FSub);
       BINARY_EXPR_CASE(FMul);
       BINARY_EXPR_CASE(FDiv);
+
+      // Same shape as ZExt and SExt: an operand and the width to produce,
+      // because the operand's own width does not say it.
+      CAST_EXPR_CASE(FPExt);
+      CAST_EXPR_CASE(FPTrunc);
+      CAST_EXPR_CASE(FPToSI);
+      CAST_EXPR_CASE(FPToUI);
+      CAST_EXPR_CASE(SIToFP);
+      CAST_EXPR_CASE(UIToFP);
   }
 }
 
@@ -595,6 +616,62 @@ ref<ConstantExpr> ConstantExpr::FUno(const ref<ConstantExpr> &RHS) {
   return ConstantExpr::alloc(
       toFloat(this).compare(toFloat(RHS)) == llvm::APFloat::cmpUnordered,
       Expr::Bool);
+}
+
+namespace {
+
+/// Converts \p from to the float format of width \p W.
+ref<ConstantExpr> convertFloat(const llvm::APFloat &from, Expr::Width W) {
+  llvm::APFloat result = from;
+  bool losesInfo = false;
+  result.convert(*klee::fpSemanticsFor(W), toNearest, &losesInfo);
+  return fromFloat(result);
+}
+
+/// Converts \p from to an integer of width \p W, toward zero, which is the
+/// rounding C specifies for this direction and the only one LLVM's fptosi and
+/// fptoui have.
+///
+/// A value that does not fit, and NaN, are poison in LLVM and unspecified in
+/// the solver alike. APFloat says so through its status, which is ignored here
+/// for the same reason: there is no defined answer to prefer, and inventing one
+/// would make the concrete and symbolic paths disagree.
+ref<ConstantExpr> convertToInteger(const llvm::APFloat &from, Expr::Width W,
+                                   bool isSigned) {
+  llvm::APSInt result(W, !isSigned);
+  bool isExact = false;
+  from.convertToInteger(result, llvm::APFloat::rmTowardZero, &isExact);
+  return ConstantExpr::alloc(result);
+}
+
+} // namespace
+
+ref<ConstantExpr> ConstantExpr::FPExt(Width W) {
+  return convertFloat(toFloat(this), W);
+}
+
+ref<ConstantExpr> ConstantExpr::FPTrunc(Width W) {
+  return convertFloat(toFloat(this), W);
+}
+
+ref<ConstantExpr> ConstantExpr::FPToSI(Width W) {
+  return convertToInteger(toFloat(this), W, /*isSigned=*/true);
+}
+
+ref<ConstantExpr> ConstantExpr::FPToUI(Width W) {
+  return convertToInteger(toFloat(this), W, /*isSigned=*/false);
+}
+
+ref<ConstantExpr> ConstantExpr::SIToFP(Width W) {
+  llvm::APFloat result(*klee::fpSemanticsFor(W));
+  result.convertFromAPInt(getAPValue(), /*IsSigned=*/true, toNearest);
+  return fromFloat(result);
+}
+
+ref<ConstantExpr> ConstantExpr::UIToFP(Width W) {
+  llvm::APFloat result(*klee::fpSemanticsFor(W));
+  result.convertFromAPInt(getAPValue(), /*IsSigned=*/false, toNearest);
+  return fromFloat(result);
 }
 
 ref<Expr>  NotOptimizedExpr::create(ref<Expr> src) {
@@ -1141,6 +1218,29 @@ FCREATE(FOLeExpr, FOLe)
 FCREATE(FUnoExpr, FUno)
 
 #undef FCREATE
+
+/// A conversion folds when both ends are widths llvm::APFloat has semantics
+/// for; the integer end always is. Where they are not -- an x87 long double,
+/// which carries an explicit integer bit and is not an interchange format --
+/// the expression is built and the solver is left to say what it means, which
+/// is the same answer the symbolic case gets.
+#define FCONVCREATE(_e_op, _op, _src_is_float, _dst_is_float)                  \
+  ref<Expr> _e_op ::create(const ref<Expr> &e, Width w) {                      \
+    if ((!(_src_is_float) || fpSemanticsFor(e->getWidth())) &&                 \
+        (!(_dst_is_float) || fpSemanticsFor(w)))                               \
+      if (ConstantExpr *ce = dyn_cast<ConstantExpr>(e))                        \
+        return ce->_op(w);                                                     \
+    return _e_op ::alloc(e, w);                                                \
+  }
+
+FCONVCREATE(FPExtExpr, FPExt, true, true)
+FCONVCREATE(FPTruncExpr, FPTrunc, true, true)
+FCONVCREATE(FPToSIExpr, FPToSI, true, false)
+FCONVCREATE(FPToUIExpr, FPToUI, true, false)
+FCONVCREATE(SIToFPExpr, SIToFP, false, true)
+FCONVCREATE(UIToFPExpr, UIToFP, false, true)
+
+#undef FCONVCREATE
 
 #define CMPCREATE(_e_op, _op) \
 ref<Expr>  _e_op ::create(const ref<Expr> &l, const ref<Expr> &r) { \
