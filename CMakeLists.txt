@@ -530,8 +530,17 @@ set(KLEE_RUNTIME_EXTRA_ARCHITECTURES "arm32" CACHE STRING
 # ARMv6-M is the least capable Cortex-M profile (M0/M0+), and every Cortex-M
 # variant from M0 through M7 shares one LLVM data layout, so a single arm32
 # runtime covers all of them.
+#
+# -fshort-enums because that is what a bare-metal ARM toolchain does: the EABI
+# gives an enumeration the smallest type that holds it, and arm-none-eabi-gcc
+# and the commercial ARM compilers all default to it, while clang does not.
+# Firmware is therefore nearly always built short-enum, and clang records the
+# choice as a min_enum_size module flag that llvm-link refuses to merge with a
+# different one. A runtime built the other way cannot be linked into that
+# firmware's bitcode at all -- not a layout difference in the result, a hard
+# failure to produce one.
 set(KLEE_RUNTIME_ARCH_FLAGS_arm32
-  "--target=thumbv6m-none-eabi;-mfloat-abi=soft;-ffreestanding;-fno-builtin"
+  "--target=thumbv6m-none-eabi;-mfloat-abi=soft;-ffreestanding;-fno-builtin;-fshort-enums"
   CACHE STRING "Flags used to build the arm32 runtime bitcode libraries")
 
 message(STATUS "Extra runtime architectures: ${KLEE_RUNTIME_EXTRA_ARCHITECTURES}")
